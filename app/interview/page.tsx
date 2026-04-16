@@ -871,6 +871,7 @@ export default function InterviewPage() {
   useEffect(() => {
     if (
       screen !== "briefing" ||
+      mayaIntroPlayed ||
       introStartedRef.current ||
       !nameLoaded ||
       candidateName === "Candidate"
@@ -882,11 +883,11 @@ export default function InterviewPage() {
     
     const t = setTimeout(() => {
       hardAbortRef.current = false;
-      void speak(intro);
       setMayaIntroPlayed(true);
+      void speak(intro);
     }, 800);
     return () => clearTimeout(t);
-  }, [screen, nameLoaded, candidateName]);
+  }, [screen, nameLoaded, candidateName, mayaIntroPlayed]);
 
   const requestMicPermission = useCallback(async () => {
     setMicStateSynced("requesting");
