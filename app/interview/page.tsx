@@ -793,6 +793,10 @@ export default function InterviewPage() {
       utterance.lang = "en-US";
 
       let settled = false;
+      // Guard: track whether synth.speak() has already been called
+      // for this utterance. The onvoiceschanged fallback timer must
+      // never call speakNow() a second time.
+      let speakCalled = false;
 
       const settle = () => {
         if (settled) return;
@@ -801,8 +805,6 @@ export default function InterviewPage() {
         resolve();
       };
 
-      // Minimum safety timer of 4000ms to prevent premature resolution
-      // on slow voice-loading browsers; cap at 30s for very long responses.
       const estimatedMs = Math.max(text.length * 85 + 3500, 4000);
       const safetyTimer = setTimeout(
         () => settle(),
@@ -838,6 +840,10 @@ export default function InterviewPage() {
       };
 
       const speakNow = () => {
+        // Prevent double-speak: if already called, do nothing.
+        if (speakCalled) return;
+        speakCalled = true;
+        synth.onvoiceschanged = null;
         const femaleVoice = pickFemaleVoice();
         if (femaleVoice) utterance.voice = femaleVoice;
         try {
@@ -851,16 +857,9 @@ export default function InterviewPage() {
       if (voices.length > 0) {
         speakNow();
       } else {
-        const handleVoicesChanged = () => {
-          synth.onvoiceschanged = null;
-          speakNow();
-        };
-        synth.onvoiceschanged = handleVoicesChanged;
+        synth.onvoiceschanged = () => speakNow();
         setTimeout(() => {
-          if (!settled) {
-            synth.onvoiceschanged = null;
-            speakNow();
-          }
+          if (!speakCalled) speakNow();
         }, 1200);
       }
     });
