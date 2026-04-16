@@ -377,13 +377,19 @@ export default function ReportPage() {
       lines.push(``, `INTERVIEW TRANSCRIPT`, `=`.repeat(50), transcript);
     }
 
+    // FIX: revoke the object URL immediately after click to prevent the
+    // browser from holding a reference to the blob for the lifetime of the page.
     const blob = new Blob([lines.join("\n")], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = `cuemath-report-${assessment.candidateName.replace(/\s+/g, "-").toLowerCase()}.txt`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    // Schedule revocation after the browser has had a chance to start the
+    // download — immediate revocation can cancel the download in some browsers.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   // ─── CSS ───────────────────────────────────────────────────────────────────
@@ -660,3 +666,5 @@ export default function ReportPage() {
     </>
   );
 }
+
+

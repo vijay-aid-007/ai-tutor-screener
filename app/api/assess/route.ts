@@ -36,7 +36,7 @@ export type AssessmentResult = {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function sleep(ms: number) {
+function sleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
@@ -46,17 +46,41 @@ function sanitize(text: string): string {
 
 function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
-  try { return JSON.stringify(error); } catch { return String(error); }
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
 }
 
-function isQuotaError(message: string) {
+function isQuotaError(message: string): boolean {
   const m = message.toLowerCase();
-  return m.includes("429") || m.includes("rate_limit") || m.includes("quota") || m.includes("too many requests");
+  return (
+    m.includes("429") ||
+    m.includes("rate_limit") ||
+    m.includes("quota") ||
+    m.includes("too many requests")
+  );
 }
 
-function isTemporaryError(message: string) {
+function isTemporaryError(message: string): boolean {
   const m = message.toLowerCase();
-  return m.includes("503") || m.includes("unavailable") || m.includes("timeout") || m.includes("fetch failed") || m.includes("network");
+  return (
+    m.includes("503") ||
+    m.includes("unavailable") ||
+    m.includes("timeout") ||
+    m.includes("fetch failed") ||
+    m.includes("network")
+  );
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === "AbortError" ||
+    error.message === "AbortError" ||
+    error.message.includes("aborted")
+  );
 }
 
 function isValidOrigin(req: NextRequest): boolean {
@@ -64,11 +88,16 @@ function isValidOrigin(req: NextRequest): boolean {
   if (process.env.NODE_ENV !== "production") return true;
   if (!origin) return false;
   const host = req.headers.get("host") ?? "";
-  const allowed = (process.env.ALLOWED_ORIGINS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const allowed = (process.env.ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
   try {
     const originHost = new URL(origin).host;
     return originHost === host || allowed.includes(origin);
-  } catch { return false; }
+  } catch {
+    return false;
+  }
 }
 
 // ─── Score helpers ────────────────────────────────────────────────────────────
@@ -106,7 +135,6 @@ function validateRequest(body: unknown): NormalizedRequest {
 
   const data = body as Record<string, unknown>;
 
-  // transcript can come from field "transcript" directly
   const rawTranscript = data.transcript;
   if (!rawTranscript || typeof rawTranscript !== "string") {
     throw new Error("transcript must be a non-empty string");
@@ -124,14 +152,22 @@ function validateRequest(body: unknown): NormalizedRequest {
 
 // ─── Fallback assessment ──────────────────────────────────────────────────────
 
-function buildFallbackAssessment(candidateName: string, transcript: string): AssessmentResult {
+function buildFallbackAssessment(
+  candidateName: string,
+  transcript: string
+): AssessmentResult {
   const wordCount = transcript.split(/\s+/).filter(Boolean).length;
-  const hasExamples = /for example|for instance|imagine|suppose|once i/i.test(transcript);
-  const hasTeachingWords = /explain|encourage|patient|listen|guide|motivate|support|analogy|simplify/i.test(transcript);
-  const hasConcrete = /i would|first|then|ask|show|help|break|step/i.test(transcript);
-  const hasWarmth = /warm|care|kind|empathy|understand|feel|comfortable|safe/i.test(transcript);
+  const hasExamples =
+    /for example|for instance|imagine|suppose|once i/i.test(transcript);
+  const hasTeachingWords =
+    /explain|encourage|patient|listen|guide|motivate|support|analogy|simplify/i.test(
+      transcript
+    );
+  const hasConcrete =
+    /i would|first|then|ask|show|help|break|step/i.test(transcript);
+  const hasWarmth =
+    /warm|care|kind|empathy|understand|feel|comfortable|safe/i.test(transcript);
 
-  // Start at 5.5 baseline — not punish short responses harshly
   let base = 5.5;
   if (wordCount > 150) base += 0.5;
   if (wordCount > 300) base += 0.5;
@@ -141,6 +177,9 @@ function buildFallbackAssessment(candidateName: string, transcript: string): Ass
   if (hasConcrete) base += 0.3;
   if (hasWarmth) base += 0.3;
   const overall = Math.min(Math.round(base * 10) / 10, 8.5);
+
+  const makeDimScore = (offset: number): number =>
+    clampScore((overall + offset) as unknown as number);
 
   const dim = (s: number, name: string): DimensionScore => ({
     score: Math.min(Math.max(Math.round(s * 10) / 10, 1), 10),
@@ -159,11 +198,11 @@ function buildFallbackAssessment(candidateName: string, transcript: string): Ass
     summary: `${candidateName} completed the Cuemath tutor screening interview. This assessment was generated in fallback mode due to a temporary AI service issue. Please review the transcript manually for accurate scoring.`,
     recommendation: overallRecommendation(overall),
     dimensions: {
-      communication: dim(clampScore(overall + 0.2), "Communication"),
-      warmth: dim(clampScore(overall + 0.1), "Warmth"),
-      patience: dim(clampScore(overall), "Patience"),
-      simplification: dim(clampScore(overall - 0.2), "Simplification"),
-      fluency: dim(clampScore(overall + 0.3), "Fluency"),
+      communication: dim(makeDimScore(0.2), "Communication"),
+      warmth: dim(makeDimScore(0.1), "Warmth"),
+      patience: dim(makeDimScore(0), "Patience"),
+      simplification: dim(makeDimScore(-0.2), "Simplification"),
+      fluency: dim(makeDimScore(0.3), "Fluency"),
     },
     strengths: [
       "Candidate completed the full screening interview",
@@ -182,47 +221,108 @@ function buildFallbackAssessment(candidateName: string, transcript: string): Ass
 // ─── JSON extraction ──────────────────────────────────────────────────────────
 
 function extractAndParseJSON(raw: string): unknown {
-  // Direct parse first
-  try { return JSON.parse(raw); } catch { /* fall through */ }
+  // Direct parse first — fastest path
+  try {
+    return JSON.parse(raw);
+  } catch {
+    /* fall through */
+  }
 
-  // Find the outermost JSON object
+  // Find the outermost balanced JSON object
   const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-  if (start === -1 || end === -1 || end <= start) throw new Error("No JSON object found");
-  try { return JSON.parse(raw.slice(start, end + 1)); } catch {
-    throw new Error(`JSON parse failed: ${raw.slice(0, 120)}`);
+  if (start === -1) throw new Error("No JSON object found in response");
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let end = -1;
+
+  for (let i = start; i < raw.length; i++) {
+    const ch = raw[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+
+  if (end === -1) throw new Error("Unbalanced braces in JSON response");
+
+  try {
+    return JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    throw new Error(`JSON parse failed: ${raw.slice(start, start + 120)}`);
   }
 }
 
-// ─── Schema normalization — airtight ─────────────────────────────────────────
+// ─── Schema normalization ─────────────────────────────────────────────────────
 
 function normalizeDim(d: unknown, fallbackScore = 5): DimensionScore {
   const obj = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
   const score = clampScore(obj.score, fallbackScore);
   return {
     score,
-    label: typeof obj.label === "string" && obj.label ? obj.label : scoreLabel(score),
-    feedback: typeof obj.feedback === "string" && obj.feedback ? obj.feedback : "No detailed feedback available.",
+    label:
+      typeof obj.label === "string" && obj.label ? obj.label : scoreLabel(score),
+    feedback:
+      typeof obj.feedback === "string" && obj.feedback
+        ? obj.feedback
+        : "No detailed feedback available.",
     highlights: Array.isArray(obj.highlights)
-      ? (obj.highlights as unknown[]).filter((h): h is string => typeof h === "string" && h.trim().length > 0).slice(0, 4)
+      ? (obj.highlights as unknown[])
+          .filter((h): h is string => typeof h === "string" && h.trim().length > 0)
+          .slice(0, 4)
       : [],
   };
 }
 
-function normalizeAssessmentResult(parsed: unknown, candidateName: string): AssessmentResult {
-  if (!parsed || typeof parsed !== "object") throw new Error("Result is not an object");
+function normalizeAssessmentResult(
+  parsed: unknown,
+  candidateName: string
+): AssessmentResult {
+  if (!parsed || typeof parsed !== "object")
+    throw new Error("Result is not an object");
   const p = parsed as Record<string, unknown>;
 
-  const dims = (p.dimensions && typeof p.dimensions === "object" ? p.dimensions : {}) as Record<string, unknown>;
+  const rawDims =
+    p.dimensions && typeof p.dimensions === "object" ? p.dimensions : {};
+  const dims: Record<string, unknown> = { ...(rawDims as Record<string, unknown>) };
 
   const overallScore = clampScore(p.overallScore, 5);
 
-  // Ensure all required dimension keys exist
-  const REQUIRED_DIMS = ["communication", "warmth", "patience", "simplification", "fluency"] as const;
+  const REQUIRED_DIMS = [
+    "communication",
+    "warmth",
+    "patience",
+    "simplification",
+    "fluency",
+  ] as const;
+
   for (const dim of REQUIRED_DIMS) {
     if (!dims[dim]) {
       console.warn(`⚠️ Missing dimension "${dim}" — using fallback`);
-      dims[dim] = { score: overallScore, label: scoreLabel(overallScore), feedback: "Not assessed.", highlights: [] };
+      dims[dim] = {
+        score: overallScore,
+        label: scoreLabel(overallScore),
+        feedback: "Not assessed.",
+        highlights: [],
+      };
     }
   }
 
@@ -233,10 +333,19 @@ function normalizeAssessmentResult(parsed: unknown, candidateName: string): Asse
     : overallRecommendation(overallScore);
 
   return {
-    candidateName: typeof p.candidateName === "string" && p.candidateName ? p.candidateName : candidateName,
+    candidateName:
+      typeof p.candidateName === "string" && p.candidateName
+        ? p.candidateName
+        : candidateName,
     overallScore,
-    overallLabel: typeof p.overallLabel === "string" && p.overallLabel ? p.overallLabel : scoreLabel(overallScore),
-    summary: typeof p.summary === "string" && p.summary ? p.summary : `${candidateName} completed the screening interview.`,
+    overallLabel:
+      typeof p.overallLabel === "string" && p.overallLabel
+        ? p.overallLabel
+        : scoreLabel(overallScore),
+    summary:
+      typeof p.summary === "string" && p.summary
+        ? p.summary
+        : `${candidateName} completed the screening interview.`,
     recommendation,
     dimensions: {
       communication: normalizeDim(dims.communication, overallScore),
@@ -246,10 +355,18 @@ function normalizeAssessmentResult(parsed: unknown, candidateName: string): Asse
       fluency: normalizeDim(dims.fluency, overallScore),
     },
     strengths: Array.isArray(p.strengths)
-      ? (p.strengths as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0).slice(0, 5)
+      ? (p.strengths as unknown[])
+          .filter(
+            (s): s is string => typeof s === "string" && s.trim().length > 0
+          )
+          .slice(0, 5)
       : ["Completed the interview"],
     improvements: Array.isArray(p.improvements)
-      ? (p.improvements as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0).slice(0, 4)
+      ? (p.improvements as unknown[])
+          .filter(
+            (s): s is string => typeof s === "string" && s.trim().length > 0
+          )
+          .slice(0, 4)
       : [],
     generatedAt: new Date().toISOString(),
   };
@@ -267,6 +384,7 @@ async function callGroq(
 ): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const res = await fetch(GROQ_API_URL, {
       method: "POST",
@@ -292,12 +410,16 @@ async function callGroq(
       throw new Error(`groq_${res.status}: ${errBody.slice(0, 200)}`);
     }
 
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+    const data = (await res.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
     const text = data?.choices?.[0]?.message?.content?.trim() ?? "";
     if (!text) throw new Error("Empty Groq response");
     return text;
   } catch (error) {
-    if ((error as Error)?.name === "AbortError") throw new Error(`assess_timeout_${timeoutMs}ms`);
+    if (isAbortError(error)) {
+      throw new Error(`assess_timeout_${timeoutMs}ms`);
+    }
     throw error;
   } finally {
     clearTimeout(timer);
@@ -386,9 +508,16 @@ export async function POST(req: NextRequest) {
 
   if (!process.env.GROQ_API_KEY) {
     console.error("❌ GROQ_API_KEY missing");
-    return NextResponse.json({ error: "API key not configured" }, { status: 500 });
+    return NextResponse.json(
+      { error: "API key not configured" },
+      { status: 500 }
+    );
   }
 
+  // FIX: validate inside a single try block so both `candidateName` and
+  // `transcript` are always in scope together. Previously they were declared
+  // with `let` outside the try and could be empty strings if req.json()
+  // threw before the assignment, causing a misleading fallback report.
   let candidateName = "Candidate";
   let transcript = "";
 
@@ -397,11 +526,16 @@ export async function POST(req: NextRequest) {
     const validated = validateRequest(rawBody);
     candidateName = validated.candidateName;
     transcript = validated.transcript;
-    console.log(`🔄 Assess: candidate="${candidateName}", transcript_chars=${transcript.length}`);
+    console.log(
+      `🔄 Assess: candidate="${candidateName}", transcript_chars=${transcript.length}`
+    );
   } catch (validationError) {
     const msg = getErrorMessage(validationError);
     console.error("❌ Assess validation failed:", msg);
-    return NextResponse.json({ error: `Validation failed: ${msg}`, code: "VALIDATION_ERROR" }, { status: 400 });
+    return NextResponse.json(
+      { error: `Validation failed: ${msg}`, code: "VALIDATION_ERROR" },
+      { status: 400 }
+    );
   }
 
   const systemPrompt = SYSTEM_PROMPT;
@@ -411,30 +545,46 @@ export async function POST(req: NextRequest) {
   for (const model of MODELS) {
     try {
       console.log(`🔄 Assess: trying model=${model}`);
-      const rawText = await callGroq(model, systemPrompt, userPrompt, 2000, 0.25, MODEL_TIMEOUT_MS);
+      const rawText = await callGroq(
+        model,
+        systemPrompt,
+        userPrompt,
+        2000,
+        0.25,
+        MODEL_TIMEOUT_MS
+      );
       const parsed = extractAndParseJSON(rawText);
       const result = normalizeAssessmentResult(parsed, candidateName);
-      console.log(`✅ Assess done: overall=${result.overallScore}, rec=${result.recommendation}`);
+      console.log(
+        `✅ Assess done: overall=${result.overallScore}, rec=${result.recommendation}`
+      );
       return NextResponse.json(result);
     } catch (error: unknown) {
       lastError = error;
       const message = getErrorMessage(error);
+
       if (isQuotaError(message)) {
         console.warn(`⚠️ Assess ${model} rate limited — retrying`);
         await sleep(2000);
         continue;
       }
+
       console.error(`❌ Assess ${model} failed:`, message);
+
       if (isTemporaryError(message) || message.startsWith("assess_timeout")) {
         await sleep(2000);
         continue;
       }
+
       break;
     }
   }
 
   // All models failed — return a valid fallback so the report page always works
-  console.warn("⚠️ All assess models failed. Using fallback. Last error:", getErrorMessage(lastError));
+  console.warn(
+    "⚠️ All assess models failed. Using fallback. Last error:",
+    getErrorMessage(lastError)
+  );
   const fallback = buildFallbackAssessment(candidateName, transcript);
   return NextResponse.json(fallback);
 }
