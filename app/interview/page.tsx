@@ -869,13 +869,12 @@ export default function InterviewPage() {
   
 
   const introStartedRef = useRef(false);
+  const speakRef = useRef(speak);
+  useEffect(() => { speakRef.current = speak; }, [speak]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     if (screen !== "briefing" || !nameLoaded || candidateName === "Candidate") return;
-
-    // sessionStorage is the single authoritative lock — checked first,
-    // before any React state, so Strict Mode double-invocations are blocked.
     if (sessionStorage.getItem("maya_intro_played") === "true") return;
     if (introStartedRef.current) return;
 
@@ -887,10 +886,11 @@ export default function InterviewPage() {
     const t = setTimeout(() => {
       hardAbortRef.current = false;
       setMayaIntroPlayed(true);
-      void speak(intro);
+      void speakRef.current(intro);
     }, 800);
     return () => clearTimeout(t);
-  }, [screen, nameLoaded, candidateName, speak]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screen, nameLoaded, candidateName]);
 
   
   const requestMicPermission = useCallback(async () => {
