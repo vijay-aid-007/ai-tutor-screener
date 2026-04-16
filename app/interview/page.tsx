@@ -871,51 +871,26 @@ export default function InterviewPage() {
   const introStartedRef = useRef(false);
 
   useEffect(() => {
-
     if (typeof window === "undefined") return;
+    if (screen !== "briefing" || !nameLoaded || candidateName === "Candidate") return;
 
-    console.log("INTRO EFFECT RUN", {
-      screen,
-      mayaIntroPlayed,
-      introStartedRef: introStartedRef.current,
-      sessionLock: sessionStorage.getItem("maya_intro_played"),
-      windowLock: (window as typeof window & { __mayaIntroStarted?: boolean }).__mayaIntroStarted,
-      nameLoaded,
-      candidateName,
-    });
+    // sessionStorage is the single authoritative lock — checked first,
+    // before any React state, so Strict Mode double-invocations are blocked.
+    if (sessionStorage.getItem("maya_intro_played") === "true") return;
+    if (introStartedRef.current) return;
 
-    const introLockedInSession = 
-      sessionStorage.getItem("maya_intro_played") === "true";
-    
-    const introLockedInWindow = 
-      (window as typeof window & { __mayaIntroStarted?: boolean }).__mayaIntroStarted === true;
-
-    if (
-      screen !== "briefing" ||
-      mayaIntroPlayed ||
-      introStartedRef.current ||
-      introLockedInSession ||
-      introLockedInWindow ||
-      !nameLoaded ||
-      candidateName === "Candidate"
-    ) {
-      return;
-    }
     introStartedRef.current = true;
-    (window as typeof window & { __mayaIntroStarted?: boolean }).__mayaIntroStarted = true;
     sessionStorage.setItem("maya_intro_played", "true");
 
-    const intro = `Hi ${candidateName}! I'm Maya. Nice meeting you da. Nee yadhavaa.`;
-    // const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
-    
+    const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+
     const t = setTimeout(() => {
-      console.log("INTRO SPEAKING NOW");
       hardAbortRef.current = false;
       setMayaIntroPlayed(true);
       void speak(intro);
     }, 800);
     return () => clearTimeout(t);
-  }, [screen, nameLoaded, candidateName, mayaIntroPlayed]);
+  }, [screen, nameLoaded, candidateName, speak]);
 
   
   const requestMicPermission = useCallback(async () => {
@@ -2130,6 +2105,7 @@ export default function InterviewPage() {
 
   const handleReturnHome = useCallback(() => {
     stopEverythingNow();
+    sessionStorage.removeItem("maya_intro_played");
     router.push("/");
   }, [router, stopEverythingNow]);
 
