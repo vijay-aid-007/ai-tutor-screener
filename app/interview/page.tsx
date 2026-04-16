@@ -905,7 +905,8 @@ export default function InterviewPage() {
     (window as typeof window & { __mayaIntroStarted?: boolean }).__mayaIntroStarted = true;
     sessionStorage.setItem("maya_intro_played", "true");
 
-    const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+    // const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+    const intro = `Hi ${candidateName}!`;
     
     const t = setTimeout(() => {
       console.log("INTRO SPEAKING NOW");
