@@ -1,47 +1,47 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// ─── Groq API (same provider as chat — no Gemini dependency) ─────────────────
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
-// Order: best quality first, fastest/most-available last
-const GROQ_ASSESS_MODELS = [
-  "llama-3.3-70b-versatile",   // Primary: highest quality for assessment
-  "llama-3.1-8b-instant",      // Fallback: fastest, most quota-friendly
-];
-const MODEL_TIMEOUT_MS = 25000; // Assessment needs more tokens → longer timeout
-const RATE_LIMIT_BASE_DELAY_MS = 1200;
+const MODELS = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
+const MODEL_TIMEOUT_MS = 28000;
+const MAX_TRANSCRIPT_LENGTH = 14000;
+const MAX_NAME_LENGTH = 80;
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+export type DimensionScore = {
+  score: number;
+  label: string;
+  feedback: string;
+  highlights: string[];
+};
+
+export type AssessmentResult = {
+  candidateName: string;
+  overallScore: number;
+  overallLabel: string;
+  summary: string;
+  recommendation: "Proceed" | "Consider" | "Decline";
+  dimensions: {
+    communication: DimensionScore;
+    warmth: DimensionScore;
+    patience: DimensionScore;
+    simplification: DimensionScore;
+    fluency: DimensionScore;
+  };
+  strengths: string[];
+  improvements: string[];
+  generatedAt: string;
+  _fallback?: boolean;
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
-function normalizeText(text: string) {
-  return text.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-function getWordCount(text: string) {
-  return normalizeText(text).split(" ").filter(Boolean).length;
-}
-
-function clamp(n: number, min = 1, max = 10) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function average(nums: number[]) {
-  if (!nums.length) return 0;
-  return nums.reduce((a, b) => a + b, 0) / nums.length;
-}
-
-function safeEvidence(answer?: string): string {
-  const text = (answer || "").trim();
-  if (!text) return "Insufficient evidence from transcript";
-  if (text.length <= 200) return text;
-  const w = text.slice(0, 200);
-  const lastPeriod = Math.max(w.lastIndexOf("."), w.lastIndexOf("!"), w.lastIndexOf("?"));
-  if (lastPeriod > 80) return text.slice(0, lastPeriod + 1);
-  const lastSpace = w.lastIndexOf(" ");
-  return lastSpace > 0 ? text.slice(0, lastSpace) + "…" : w + "…";
+function sanitize(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function getErrorMessage(error: unknown): string {
@@ -51,18 +51,12 @@ function getErrorMessage(error: unknown): string {
 
 function isQuotaError(message: string) {
   const m = message.toLowerCase();
-  return m.includes("429") || m.includes("rate_limit") || m.includes("quota") ||
-    m.includes("too many requests") || m.includes("rate limit") ||
-    m.includes("resource_exhausted") || m.includes("exhausted");
+  return m.includes("429") || m.includes("rate_limit") || m.includes("quota") || m.includes("too many requests");
 }
 
 function isTemporaryError(message: string) {
   const m = message.toLowerCase();
-  return m.includes("503") || m.includes("unavailable") || m.includes("timeout") || m.includes("fetch failed");
-}
-
-function isTimeoutError(message: string) {
-  return message.startsWith("model_timeout_");
+  return m.includes("503") || m.includes("unavailable") || m.includes("timeout") || m.includes("fetch failed") || m.includes("network");
 }
 
 function isValidOrigin(req: NextRequest): boolean {
@@ -77,74 +71,208 @@ function isValidOrigin(req: NextRequest): boolean {
   } catch { return false; }
 }
 
-function trimTranscript(text: string, maxChars = 12000) {
-  return text.length > maxChars ? text.slice(-maxChars) : text;
+// ─── Score helpers ────────────────────────────────────────────────────────────
+
+function scoreLabel(score: number): string {
+  if (score >= 9) return "Exceptional";
+  if (score >= 8) return "Excellent";
+  if (score >= 7) return "Good";
+  if (score >= 6) return "Satisfactory";
+  if (score >= 5) return "Adequate";
+  if (score >= 4) return "Needs Improvement";
+  return "Poor";
 }
 
-function isGreetingOnly(text: string, candidateName: string) {
-  const t = normalizeText(text);
-  const name = normalizeText(candidateName);
-  const patterns = [
-    `hi my name is ${name}`, `hello my name is ${name}`,
-    `hi i am ${name}`, `hello i am ${name}`, `my name is ${name}`,
-  ];
-  return patterns.some((p) => t === p || t === `${p}.`);
+function overallRecommendation(score: number): "Proceed" | "Consider" | "Decline" {
+  if (score >= 7) return "Proceed";
+  if (score >= 5) return "Consider";
+  return "Decline";
 }
 
-function isNonAnswer(text: string) {
-  const t = normalizeText(text);
-  const exact = new Set([
-    "i don't know", "i dont know", "dont know", "do not know", "idk",
-    "not sure", "no idea", "i have no idea", "can't say", "cannot say",
-    "nothing", "no", "nope", "nah", "skip", "pass",
-    "i don't know about that", "i dont know about that",
-    "no response", "[no response]", "(no verbal response given)",
-  ]);
-  const strongPatterns = [
-    "don't know", "dont know", "not sure", "no idea", "i have no idea",
-    "cannot say", "can't say", "not familiar", "unfamiliar", "no response",
-  ];
-  return (
-    exact.has(t) ||
-    strongPatterns.some((p) => t.includes(p)) ||
-    (getWordCount(t) <= 6 && (t === "no" || t === "nothing" || t === "idk"))
-  );
+function clampScore(n: unknown, fallback = 5): number {
+  if (typeof n !== "number" || isNaN(n)) return fallback;
+  return Math.min(Math.max(Math.round(n * 10) / 10, 1), 10);
 }
 
-function isConfusionText(text: string) {
-  const t = normalizeText(text);
-  return (
-    t.includes("didn't understand") || t.includes("did not understand") ||
-    t.includes("don't understand") || t.includes("do not understand") ||
-    t.includes("not understand") || t.includes("i am confused") ||
-    t.includes("i'm confused") || t.includes("confused") ||
-    t.includes("can you repeat") || t.includes("repeat the question") ||
-    t.includes("say again") || t.includes("what do you mean")
-  );
+// ─── Request validation ───────────────────────────────────────────────────────
+
+type NormalizedRequest = {
+  transcript: string;
+  candidateName: string;
+};
+
+function validateRequest(body: unknown): NormalizedRequest {
+  if (!body || typeof body !== "object") throw new Error("Invalid request body");
+
+  const data = body as Record<string, unknown>;
+
+  // transcript can come from field "transcript" directly
+  const rawTranscript = data.transcript;
+  if (!rawTranscript || typeof rawTranscript !== "string") {
+    throw new Error("transcript must be a non-empty string");
+  }
+  const transcript = sanitize(rawTranscript).slice(0, MAX_TRANSCRIPT_LENGTH);
+  if (transcript.length < 10) throw new Error("transcript too short");
+
+  const candidateName =
+    typeof data.candidateName === "string" && data.candidateName.trim()
+      ? sanitize(data.candidateName).slice(0, MAX_NAME_LENGTH)
+      : "Candidate";
+
+  return { transcript, candidateName };
 }
 
-// ─── Groq API call ────────────────────────────────────────────────────────────
+// ─── Fallback assessment ──────────────────────────────────────────────────────
+
+function buildFallbackAssessment(candidateName: string, transcript: string): AssessmentResult {
+  const wordCount = transcript.split(/\s+/).filter(Boolean).length;
+  const hasExamples = /for example|for instance|imagine|suppose|once i/i.test(transcript);
+  const hasTeachingWords = /explain|encourage|patient|listen|guide|motivate|support|analogy|simplify/i.test(transcript);
+  const hasConcrete = /i would|first|then|ask|show|help|break|step/i.test(transcript);
+  const hasWarmth = /warm|care|kind|empathy|understand|feel|comfortable|safe/i.test(transcript);
+
+  // Start at 5.5 baseline — not punish short responses harshly
+  let base = 5.5;
+  if (wordCount > 150) base += 0.5;
+  if (wordCount > 300) base += 0.5;
+  if (wordCount > 500) base += 0.3;
+  if (hasExamples) base += 0.5;
+  if (hasTeachingWords) base += 0.4;
+  if (hasConcrete) base += 0.3;
+  if (hasWarmth) base += 0.3;
+  const overall = Math.min(Math.round(base * 10) / 10, 8.5);
+
+  const dim = (s: number, name: string): DimensionScore => ({
+    score: Math.min(Math.max(Math.round(s * 10) / 10, 1), 10),
+    label: scoreLabel(s),
+    feedback: `Assessment for ${name} was generated using offline heuristics because the AI scoring service was temporarily unavailable. A manual review of the transcript is recommended.`,
+    highlights: [
+      "Candidate completed the interview",
+      "Transcript captured successfully — manual review recommended",
+    ],
+  });
+
+  return {
+    candidateName,
+    overallScore: overall,
+    overallLabel: scoreLabel(overall),
+    summary: `${candidateName} completed the Cuemath tutor screening interview. This assessment was generated in fallback mode due to a temporary AI service issue. Please review the transcript manually for accurate scoring.`,
+    recommendation: overallRecommendation(overall),
+    dimensions: {
+      communication: dim(clampScore(overall + 0.2), "Communication"),
+      warmth: dim(clampScore(overall + 0.1), "Warmth"),
+      patience: dim(clampScore(overall), "Patience"),
+      simplification: dim(clampScore(overall - 0.2), "Simplification"),
+      fluency: dim(clampScore(overall + 0.3), "Fluency"),
+    },
+    strengths: [
+      "Candidate completed the full screening interview",
+      "Responses were captured and transcript is available for review",
+      "Demonstrated willingness to engage with the interview process",
+    ],
+    improvements: [
+      "AI-powered detailed assessment unavailable — manual review required",
+      "Please schedule a follow-up assessment if AI scoring remains unavailable",
+    ],
+    generatedAt: new Date().toISOString(),
+    _fallback: true,
+  };
+}
+
+// ─── JSON extraction ──────────────────────────────────────────────────────────
+
+function extractAndParseJSON(raw: string): unknown {
+  // Direct parse first
+  try { return JSON.parse(raw); } catch { /* fall through */ }
+
+  // Find the outermost JSON object
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) throw new Error("No JSON object found");
+  try { return JSON.parse(raw.slice(start, end + 1)); } catch {
+    throw new Error(`JSON parse failed: ${raw.slice(0, 120)}`);
+  }
+}
+
+// ─── Schema normalization — airtight ─────────────────────────────────────────
+
+function normalizeDim(d: unknown, fallbackScore = 5): DimensionScore {
+  const obj = (d && typeof d === "object" ? d : {}) as Record<string, unknown>;
+  const score = clampScore(obj.score, fallbackScore);
+  return {
+    score,
+    label: typeof obj.label === "string" && obj.label ? obj.label : scoreLabel(score),
+    feedback: typeof obj.feedback === "string" && obj.feedback ? obj.feedback : "No detailed feedback available.",
+    highlights: Array.isArray(obj.highlights)
+      ? (obj.highlights as unknown[]).filter((h): h is string => typeof h === "string" && h.trim().length > 0).slice(0, 4)
+      : [],
+  };
+}
+
+function normalizeAssessmentResult(parsed: unknown, candidateName: string): AssessmentResult {
+  if (!parsed || typeof parsed !== "object") throw new Error("Result is not an object");
+  const p = parsed as Record<string, unknown>;
+
+  const dims = (p.dimensions && typeof p.dimensions === "object" ? p.dimensions : {}) as Record<string, unknown>;
+
+  const overallScore = clampScore(p.overallScore, 5);
+
+  // Ensure all required dimension keys exist
+  const REQUIRED_DIMS = ["communication", "warmth", "patience", "simplification", "fluency"] as const;
+  for (const dim of REQUIRED_DIMS) {
+    if (!dims[dim]) {
+      console.warn(`⚠️ Missing dimension "${dim}" — using fallback`);
+      dims[dim] = { score: overallScore, label: scoreLabel(overallScore), feedback: "Not assessed.", highlights: [] };
+    }
+  }
+
+  const recommendation = (["Proceed", "Consider", "Decline"] as const).includes(
+    p.recommendation as "Proceed" | "Consider" | "Decline"
+  )
+    ? (p.recommendation as "Proceed" | "Consider" | "Decline")
+    : overallRecommendation(overallScore);
+
+  return {
+    candidateName: typeof p.candidateName === "string" && p.candidateName ? p.candidateName : candidateName,
+    overallScore,
+    overallLabel: typeof p.overallLabel === "string" && p.overallLabel ? p.overallLabel : scoreLabel(overallScore),
+    summary: typeof p.summary === "string" && p.summary ? p.summary : `${candidateName} completed the screening interview.`,
+    recommendation,
+    dimensions: {
+      communication: normalizeDim(dims.communication, overallScore),
+      warmth: normalizeDim(dims.warmth, overallScore),
+      patience: normalizeDim(dims.patience, overallScore),
+      simplification: normalizeDim(dims.simplification, overallScore),
+      fluency: normalizeDim(dims.fluency, overallScore),
+    },
+    strengths: Array.isArray(p.strengths)
+      ? (p.strengths as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0).slice(0, 5)
+      : ["Completed the interview"],
+    improvements: Array.isArray(p.improvements)
+      ? (p.improvements as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0).slice(0, 4)
+      : [],
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+// ─── Groq call ────────────────────────────────────────────────────────────────
 
 async function callGroq(
   model: string,
   systemPrompt: string,
   userPrompt: string,
-  maxTokens = 1500,
-  temperature = 0.2,
+  maxTokens = 2000,
+  temperature = 0.25,
   timeoutMs = MODEL_TIMEOUT_MS
 ): Promise<string> {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error("GROQ_API_KEY not configured");
-
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-
   try {
     const res = await fetch(GROQ_API_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
       },
       body: JSON.stringify({
         model,
@@ -154,212 +282,99 @@ async function callGroq(
         ],
         max_tokens: maxTokens,
         temperature,
+        response_format: { type: "json_object" },
       }),
       signal: controller.signal,
     });
 
     if (!res.ok) {
       const errBody = await res.text();
-      throw new Error(`groq_${res.status}: ${errBody}`);
+      throw new Error(`groq_${res.status}: ${errBody.slice(0, 200)}`);
     }
 
-    const data = await res.json();
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
     const text = data?.choices?.[0]?.message?.content?.trim() ?? "";
-    if (!text) throw new Error("Empty response from Groq");
+    if (!text) throw new Error("Empty Groq response");
     return text;
   } catch (error) {
-    if ((error as Error)?.name === "AbortError") throw new Error(`model_timeout_${timeoutMs}ms`);
+    if ((error as Error)?.name === "AbortError") throw new Error(`assess_timeout_${timeoutMs}ms`);
     throw error;
   } finally {
     clearTimeout(timer);
   }
 }
 
-// ─── Fallback report builder ──────────────────────────────────────────────────
+// ─── Prompts ──────────────────────────────────────────────────────────────────
 
-function buildStrengths(totalAnswers: number, validAnswers: string[], avgWordsValid: number, nonAnswerRate: number) {
-  const strengths: string[] = [];
-  if (validAnswers.length >= 3 && avgWordsValid >= 10) strengths.push("Provided multiple interpretable responses");
-  if (avgWordsValid >= 12) strengths.push("Showed some ability to elaborate when answering");
-  if (totalAnswers >= 5 && nonAnswerRate < 0.5) strengths.push("Completed the full interview flow");
-  if (strengths.length === 0) strengths.push("Limited usable evidence was captured");
-  return strengths.slice(0, 3);
-}
+const SYSTEM_PROMPT = `You are an expert Cuemath hiring assessor evaluating tutor candidates from interview transcripts.
 
-function buildConcerns(totalAnswers: number, nonAnswerRate: number, avgWordsAll: number, validAnswers: string[], severeLowEvidence: boolean) {
-  const concerns: string[] = [];
-  if (totalAnswers === 0) concerns.push("No usable candidate responses were captured");
-  if (severeLowEvidence) {
-    concerns.push("The interview contained mostly non-answers or insufficient verbal evidence");
-  } else if (nonAnswerRate >= 0.5) {
-    concerns.push("Multiple responses were non-answers or too brief for reliable evaluation");
-  }
-  if (avgWordsAll < 6) concerns.push("Limited verbal depth reduced confidence in scoring");
-  if (validAnswers.length < 2) concerns.push("There was insufficient evidence of tutoring communication ability");
-  concerns.push("Assessment generated from fallback mode — manual review recommended");
-  return concerns.slice(0, 3);
-}
+Return ONLY a valid JSON object — no markdown, no code fences, no commentary. Match this schema exactly:
 
-function sanitizeWeakAssessment(candidateName: string, normalized: Record<string, unknown>) {
-  const dimensions = (normalized.dimensions ?? {}) as Record<string, { score?: number; evidence?: string }>;
-  const evidenceTexts = [
-    dimensions.communication_clarity?.evidence,
-    dimensions.warmth?.evidence,
-    dimensions.patience?.evidence,
-    dimensions.ability_to_simplify?.evidence,
-    dimensions.english_fluency?.evidence,
-  ].filter(Boolean).map((x) => normalizeText(x as string));
-
-  const weakEvidenceCount = evidenceTexts.filter(
-    (t) => isNonAnswer(t) || isConfusionText(t) || getWordCount(t) <= 2
-  ).length;
-
-  if (weakEvidenceCount < 4) return normalized;
-
-  return {
-    ...normalized,
-    recommendation: "REJECT" as const,
-    overall_score: Math.min(Number(normalized.overall_score ?? 2), 2),
-    summary: `${candidateName} was unable to provide enough meaningful responses for evaluation. The transcript contains mostly non-answers or insufficient verbal evidence, so this assessment is intentionally conservative and the candidate is not recommended to proceed.`,
-    dimensions: {
-      communication_clarity: { score: Math.min(Number(dimensions.communication_clarity?.score ?? 2), 2), evidence: dimensions.communication_clarity?.evidence ?? "Insufficient evidence from transcript" },
-      warmth: { score: Math.min(Number(dimensions.warmth?.score ?? 3), 3), evidence: dimensions.warmth?.evidence ?? "Insufficient evidence from transcript" },
-      patience: { score: Math.min(Number(dimensions.patience?.score ?? 3), 3), evidence: dimensions.patience?.evidence ?? "Insufficient evidence from transcript" },
-      ability_to_simplify: { score: Math.min(Number(dimensions.ability_to_simplify?.score ?? 2), 2), evidence: dimensions.ability_to_simplify?.evidence ?? "Insufficient evidence from transcript" },
-      english_fluency: { score: Math.min(Number(dimensions.english_fluency?.score ?? 2), 2), evidence: dimensions.english_fluency?.evidence ?? "Insufficient evidence from transcript" },
+{
+  "candidateName": "string",
+  "overallScore": number (1.0-10.0, one decimal place),
+  "overallLabel": "string",
+  "summary": "string (3-4 sentences, specific to this candidate)",
+  "recommendation": "Proceed" | "Consider" | "Decline",
+  "dimensions": {
+    "communication": {
+      "score": number (1-10),
+      "label": "string",
+      "feedback": "string (2-3 sentences, cite specific things they said)",
+      "highlights": ["string", "string", "string"]
     },
-    strengths: ["Limited usable evidence was captured"],
-    concerns: [
-      "The interview contained mostly non-answers or insufficient verbal evidence",
-      "There was insufficient evidence of tutoring communication ability",
-      "Manual review confirms the candidate should not proceed without stronger responses",
-    ],
-  };
-}
-
-function pickEvidence(validAnswers: string[], realAnswers: string[], usedIndices: Set<number>): string {
-  for (let i = 0; i < validAnswers.length; i++) {
-    if (!usedIndices.has(i)) { usedIndices.add(i); return validAnswers[i]; }
-  }
-  for (let i = 0; i < realAnswers.length; i++) {
-    if (!usedIndices.has(1000 + i)) { usedIndices.add(1000 + i); return realAnswers[i]; }
-  }
-  return validAnswers[0] || realAnswers[0] || "";
-}
-
-function getMostFluentAnswer(validAnswers: string[], realAnswers: string[]): string {
-  const pool = validAnswers.length > 0 ? validAnswers : realAnswers;
-  if (!pool.length) return "";
-  return pool.reduce((best, a) => (getWordCount(a) > getWordCount(best) ? a : best), pool[0]);
-}
-
-function generateFallbackReport(transcript: string, candidateName: string) {
-  const candidateLines = transcript
-    .split("\n\n")
-    .filter((line) => line.startsWith("Candidate:"))
-    .map((line) => line.replace(/^Candidate:\s*/, "").trim())
-    .filter(Boolean);
-
-  const realAnswers = candidateLines.filter((answer) => !isGreetingOnly(answer, candidateName));
-  const totalAnswers = realAnswers.length;
-  const nonAnswers = realAnswers.filter((a) => isNonAnswer(a) || isConfusionText(a));
-  const validAnswers = realAnswers.filter((a) => !isNonAnswer(a) && !isConfusionText(a));
-
-  const nonAnswerRate = totalAnswers > 0 ? nonAnswers.length / totalAnswers : 1;
-  const avgWordsAll = totalAnswers > 0 ? average(realAnswers.map(getWordCount)) : 0;
-  const avgWordsValid = validAnswers.length > 0 ? average(validAnswers.map(getWordCount)) : 0;
-
-  const severeLowEvidence =
-    totalAnswers === 0 ||
-    nonAnswerRate >= 0.8 ||
-    (validAnswers.length === 0 && totalAnswers >= 3) ||
-    (validAnswers.length <= 1 && avgWordsAll < 4);
-
-  const lowEvidence = nonAnswerRate >= 0.6 || validAnswers.length < 2 || avgWordsAll < 5;
-
-  let clarityScore = clamp(Math.round((avgWordsValid >= 18 ? 7 : avgWordsValid >= 10 ? 5 : avgWordsValid >= 5 ? 3 : 2) - nonAnswerRate * 4));
-  let fluencyScore = clamp(Math.round((avgWordsAll >= 12 ? 7 : avgWordsAll >= 7 ? 5 : avgWordsAll >= 3 ? 3 : 2) - nonAnswerRate * 3));
-  let simplicityScore = clamp(Math.round((validAnswers.length >= 2 && avgWordsValid >= 10 ? 6 : validAnswers.length >= 1 ? 4 : 2) - nonAnswerRate * 3));
-  let warmthScore = clamp(Math.round((validAnswers.length >= 2 ? 5 : 3) - nonAnswerRate * 2));
-  let patienceScore = clamp(Math.round((validAnswers.length >= 2 ? 5 : 3) - nonAnswerRate * 2));
-
-  if (severeLowEvidence) {
-    clarityScore = Math.min(clarityScore, 2); fluencyScore = Math.min(fluencyScore, 2);
-    simplicityScore = Math.min(simplicityScore, 2); warmthScore = Math.min(warmthScore, 3); patienceScore = Math.min(patienceScore, 3);
-  } else if (lowEvidence) {
-    clarityScore = Math.min(clarityScore, 4); fluencyScore = Math.min(fluencyScore, 4);
-    simplicityScore = Math.min(simplicityScore, 4); warmthScore = Math.min(warmthScore, 5); patienceScore = Math.min(patienceScore, 5);
-  }
-
-  let overall = clamp(Math.round((clarityScore + fluencyScore + simplicityScore + warmthScore + patienceScore) / 5));
-  if (severeLowEvidence) overall = Math.min(overall, 2);
-  else if (lowEvidence) overall = Math.min(overall, 4);
-
-  const recommendation: "PROCEED" | "CONSIDER" | "REJECT" =
-    severeLowEvidence ? "REJECT" :
-    lowEvidence ? (overall >= 5 ? "CONSIDER" : "REJECT") :
-    overall >= 7 ? "PROCEED" : overall >= 5 ? "CONSIDER" : "REJECT";
-
-  const summary = severeLowEvidence
-    ? `${candidateName} was unable to provide enough meaningful responses for evaluation. The transcript contains mostly non-answers or insufficient verbal evidence, so this assessment is intentionally conservative and the candidate is not recommended to proceed.`
-    : lowEvidence
-    ? `${candidateName} participated in the interview, but the available responses were too limited for a confident skills assessment. Manual review is possible, but the current evidence does not strongly support progression.`
-    : `${candidateName} completed the interview with mixed response quality. This fallback report is based on observable response depth and consistency, so manual review is recommended for final judgment.`;
-
-  const usedIndices = new Set<number>();
-  const mostFluentAnswer = getMostFluentAnswer(validAnswers, realAnswers);
-
-  return {
-    candidate_name: candidateName,
-    recommendation,
-    overall_score: overall,
-    summary,
-    dimensions: {
-      communication_clarity: { score: clarityScore, evidence: safeEvidence(pickEvidence(validAnswers, realAnswers, usedIndices)) },
-      warmth: { score: warmthScore, evidence: safeEvidence(pickEvidence(validAnswers, realAnswers, usedIndices)) },
-      patience: { score: patienceScore, evidence: safeEvidence(pickEvidence(validAnswers, realAnswers, usedIndices)) },
-      ability_to_simplify: { score: simplicityScore, evidence: safeEvidence(pickEvidence(validAnswers, realAnswers, usedIndices)) },
-      english_fluency: { score: fluencyScore, evidence: safeEvidence(mostFluentAnswer) },
+    "warmth": {
+      "score": number,
+      "label": "string",
+      "feedback": "string",
+      "highlights": ["string", "string"]
     },
-    strengths: buildStrengths(totalAnswers, validAnswers, avgWordsValid, nonAnswerRate),
-    concerns: buildConcerns(totalAnswers, nonAnswerRate, avgWordsAll, validAnswers, severeLowEvidence),
-    interviewer_notes: `Fallback report. totalAnswers=${totalAnswers}, validAnswers=${validAnswers.length}, nonAnswerRate=${nonAnswerRate.toFixed(2)}, avgWordsAll=${avgWordsAll.toFixed(1)}, avgWordsValid=${avgWordsValid.toFixed(1)}, severeLowEvidence=${severeLowEvidence}. Use as a strict conservative backup only when AI assessment is unavailable.`,
-  };
+    "patience": {
+      "score": number,
+      "label": "string",
+      "feedback": "string",
+      "highlights": ["string", "string"]
+    },
+    "simplification": {
+      "score": number,
+      "label": "string",
+      "feedback": "string",
+      "highlights": ["string", "string"]
+    },
+    "fluency": {
+      "score": number,
+      "label": "string",
+      "feedback": "string",
+      "highlights": ["string", "string"]
+    }
+  },
+  "strengths": ["string", "string", "string"],
+  "improvements": ["string", "string"]
 }
 
-function sanitizeAssessment(candidateName: string, parsed: Record<string, unknown>) {
-  const safeDimensions = (parsed?.dimensions ?? {}) as Record<string, { score?: number; evidence?: string }>;
+SCORING GUIDE (be fair and specific — base everything on what was actually said):
+- 9-10: Exceptional
+- 7-8: Strong, recommended
+- 5-6: Average, needs development
+- 3-4: Weak, significant gaps
+- 1-2: Not suitable
 
-  const normalized: Record<string, unknown> = {
-    candidate_name: parsed?.candidate_name || candidateName,
-    recommendation:
-      parsed?.recommendation === "PROCEED" || parsed?.recommendation === "CONSIDER" || parsed?.recommendation === "REJECT"
-        ? parsed.recommendation : "CONSIDER",
-    overall_score: clamp(Number(parsed?.overall_score ?? 5)),
-    summary:
-      typeof parsed?.summary === "string" && (parsed.summary as string).trim()
-        ? (parsed.summary as string).trim()
-        : `${candidateName} completed the interview. Manual review is recommended.`,
-    dimensions: {
-      communication_clarity: { score: clamp(Number(safeDimensions?.communication_clarity?.score ?? 5)), evidence: safeEvidence(safeDimensions?.communication_clarity?.evidence) },
-      warmth: { score: clamp(Number(safeDimensions?.warmth?.score ?? 5)), evidence: safeEvidence(safeDimensions?.warmth?.evidence) },
-      patience: { score: clamp(Number(safeDimensions?.patience?.score ?? 5)), evidence: safeEvidence(safeDimensions?.patience?.evidence) },
-      ability_to_simplify: { score: clamp(Number(safeDimensions?.ability_to_simplify?.score ?? 5)), evidence: safeEvidence(safeDimensions?.ability_to_simplify?.evidence) },
-      english_fluency: { score: clamp(Number(safeDimensions?.english_fluency?.score ?? 5)), evidence: safeEvidence(safeDimensions?.english_fluency?.evidence) },
-    },
-    strengths: Array.isArray(parsed?.strengths)
-      ? (parsed.strengths as unknown[]).filter((x) => typeof x === "string").slice(0, 3)
-      : ["Manual review recommended"],
-    concerns: Array.isArray(parsed?.concerns)
-      ? (parsed.concerns as unknown[]).filter((x) => typeof x === "string").slice(0, 3)
-      : ["Manual review recommended"],
-    interviewer_notes:
-      typeof parsed?.interviewer_notes === "string" && (parsed.interviewer_notes as string).trim()
-        ? (parsed.interviewer_notes as string).trim()
-        : "Assessment generated successfully. Manual review is advised.",
-  };
+DIMENSIONS:
+1. Communication clarity — logical structure, clear expression
+2. Warmth & empathy — encouragement, emotional intelligence
+3. Patience under pressure — handling struggling students, silence
+4. Simplification ability — analogies, examples, child-appropriate language
+5. English fluency — grammar, vocabulary, natural expression
 
-  return sanitizeWeakAssessment(candidateName, normalized);
+Be honest and specific. Reference exact things the candidate said. Do not be harsh on short answers if they show quality. Do not be lenient on long answers that are vague.`;
+
+function buildUserPrompt(transcript: string, candidateName: string): string {
+  return `Candidate name: ${candidateName}
+
+Full interview transcript:
+${transcript}
+
+Assess this candidate across all 5 dimensions and return only the JSON object.`;
 }
 
 // ─── Route handler ────────────────────────────────────────────────────────────
@@ -371,147 +386,55 @@ export async function POST(req: NextRequest) {
 
   if (!process.env.GROQ_API_KEY) {
     console.error("❌ GROQ_API_KEY missing");
-    return NextResponse.json({ error: "API key missing" }, { status: 500 });
+    return NextResponse.json({ error: "API key not configured" }, { status: 500 });
   }
 
-  let rawTranscript = "";
   let candidateName = "Candidate";
+  let transcript = "";
 
   try {
-    const body = await req.json();
-    rawTranscript = body?.transcript || "";
-    candidateName = body?.candidateName || "Candidate";
+    const rawBody = (await req.json()) as unknown;
+    const validated = validateRequest(rawBody);
+    candidateName = validated.candidateName;
+    transcript = validated.transcript;
+    console.log(`🔄 Assess: candidate="${candidateName}", transcript_chars=${transcript.length}`);
+  } catch (validationError) {
+    const msg = getErrorMessage(validationError);
+    console.error("❌ Assess validation failed:", msg);
+    return NextResponse.json({ error: `Validation failed: ${msg}`, code: "VALIDATION_ERROR" }, { status: 400 });
+  }
 
-    if (!rawTranscript || !candidateName) {
-      return NextResponse.json({ error: "transcript and candidateName are required" }, { status: 400 });
-    }
+  const systemPrompt = SYSTEM_PROMPT;
+  const userPrompt = buildUserPrompt(transcript, candidateName);
+  let lastError: unknown = null;
 
-    const safeTranscript = trimTranscript(rawTranscript, 10000); // Groq has smaller context, trim tighter
-
-    const systemPrompt = `You are an expert hiring assessor for Cuemath. You return ONLY valid JSON. No markdown, no backticks, no extra text. Your entire response must be a single valid JSON object.`;
-
-    const userPrompt = `Analyze this interview transcript for ${candidateName}.
-
-You are evaluating for:
-- communication clarity
-- warmth
-- patience
-- ability to simplify
-- english fluency
-
-Important scoring rules:
-- Be strict and evidence-based.
-- If the candidate mostly gives non-answers such as "no", "I don't know", "not sure", silence, or extremely brief replies, the score must be very low.
-- Do not reward participation alone.
-- If evidence is weak, reflect that in both scores and concerns.
-- recommendation must match the evidence realistically.
-- If there is severe lack of usable evidence, recommendation should be REJECT.
-- Note: "(No verbal response given)" in the transcript means the candidate was silent — treat as a non-answer.
-- For english_fluency evidence: pick the candidate's LONGEST or most fluent answer, not the same quote used for clarity.
-- Each dimension MUST use a DIFFERENT quote from the transcript. Do not repeat the same evidence across multiple dimensions.
-
-TRANSCRIPT:
-${safeTranscript}
-
-Return exactly this JSON structure with real assessed values. No markdown, no backticks — pure JSON only:
-{
-  "candidate_name": "${candidateName}",
-  "recommendation": "PROCEED",
-  "overall_score": 7,
-  "summary": "Write 2-3 sentences summarizing the candidate overall",
-  "dimensions": {
-    "communication_clarity": { "score": 7, "evidence": "exact quote from transcript showing clarity" },
-    "warmth": { "score": 8, "evidence": "exact quote from transcript showing warmth — must be a DIFFERENT quote from clarity" },
-    "patience": { "score": 7, "evidence": "exact quote from transcript showing patience — must be a DIFFERENT quote from the above" },
-    "ability_to_simplify": { "score": 6, "evidence": "exact quote from transcript showing simplification — must be a DIFFERENT quote from the above" },
-    "english_fluency": { "score": 8, "evidence": "exact quote from transcript showing fluency — use candidate's most fluent/longest answer, different from above quotes" }
-  },
-  "strengths": ["strength 1", "strength 2", "strength 3"],
-  "concerns": ["concern 1", "concern 2"],
-  "interviewer_notes": "1-2 sentences of candid internal notes"
-}
-
-Rules:
-- recommendation must be exactly: PROCEED, CONSIDER, or REJECT
-- scores must be integers between 1-10
-- evidence must be real quotes from the transcript — each dimension MUST use a DIFFERENT quote
-- Replace ALL placeholders with real content
-- Return pure JSON only — no markdown fences, no extra commentary`;
-
-    let lastError: unknown = null;
-    let rateLimitCount = 0;
-
-    for (const model of GROQ_ASSESS_MODELS) {
-      try {
-        console.log(`🔄 Assess (Groq) model=${model}`);
-
-        const rawText = await callGroq(model, systemPrompt, userPrompt, 1500, 0.2, MODEL_TIMEOUT_MS);
-
-        // Strip any accidental markdown fences
-        const cleanedText = rawText.replace(/```json\s*/gi, "").replace(/```\s*/g, "").trim();
-        if (!cleanedText) throw new Error(`Empty response from ${model}`);
-
-        console.log(`✅ Groq ${model} assessment response received`);
-
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(cleanedText);
-        } catch (parseError) {
-          // Try to extract JSON object if there's surrounding text
-          const jsonMatch = cleanedText.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            try { parsed = JSON.parse(jsonMatch[0]); }
-            catch { throw new Error(`json_parse_failed: ${getErrorMessage(parseError)}`); }
-          } else {
-            throw new Error(`json_parse_failed: ${getErrorMessage(parseError)}`);
-          }
-        }
-
-        const sanitized = sanitizeAssessment(candidateName, parsed);
-        return NextResponse.json({ ...sanitized, source: "groq", model });
-      } catch (error: unknown) {
-        lastError = error;
-        const message = getErrorMessage(error);
-
-        if (message.startsWith("json_parse_failed")) {
-          console.warn(`⚠️ Groq ${model} returned unparseable JSON — trying next model`);
-          continue;
-        }
-
-        if (isQuotaError(message)) {
-          rateLimitCount++;
-          const delay = RATE_LIMIT_BASE_DELAY_MS * rateLimitCount;
-          console.warn(`⚠️ Groq ${model} rate limited — waiting ${delay}ms before next model`);
-          await sleep(delay);
-          continue;
-        }
-
-        console.error(`❌ Groq assess ${model}:`, message);
-
-        if (isTemporaryError(message) || isTimeoutError(message)) {
-          await sleep(1500);
-          continue;
-        }
-
-        // Unknown error — try next model
-        console.warn(`⚠️ Groq ${model} unknown error — trying next model`);
+  for (const model of MODELS) {
+    try {
+      console.log(`🔄 Assess: trying model=${model}`);
+      const rawText = await callGroq(model, systemPrompt, userPrompt, 2000, 0.25, MODEL_TIMEOUT_MS);
+      const parsed = extractAndParseJSON(rawText);
+      const result = normalizeAssessmentResult(parsed, candidateName);
+      console.log(`✅ Assess done: overall=${result.overallScore}, rec=${result.recommendation}`);
+      return NextResponse.json(result);
+    } catch (error: unknown) {
+      lastError = error;
+      const message = getErrorMessage(error);
+      if (isQuotaError(message)) {
+        console.warn(`⚠️ Assess ${model} rate limited — retrying`);
+        await sleep(2000);
         continue;
       }
-    }
-
-    const errMsg = getErrorMessage(lastError);
-    console.warn("⚠️ All Groq assessment models failed — using strict fallback. Last error:", errMsg);
-
-    const fallback = generateFallbackReport(trimTranscript(rawTranscript, 10000), candidateName);
-    return NextResponse.json({ ...fallback, source: "fallback", fallbackReason: "model_failure" });
-  } catch (error: unknown) {
-    const errMsg = getErrorMessage(error);
-    console.error("❌ Fatal assess error:", errMsg);
-    try {
-      const fallback = generateFallbackReport(trimTranscript(rawTranscript || "", 10000), candidateName || "Candidate");
-      return NextResponse.json({ ...fallback, source: "fallback", fallbackReason: "fatal_error" });
-    } catch {
-      return NextResponse.json({ error: errMsg || "Assessment failed" }, { status: 500 });
+      console.error(`❌ Assess ${model} failed:`, message);
+      if (isTemporaryError(message) || message.startsWith("assess_timeout")) {
+        await sleep(2000);
+        continue;
+      }
+      break;
     }
   }
+
+  // All models failed — return a valid fallback so the report page always works
+  console.warn("⚠️ All assess models failed. Using fallback. Last error:", getErrorMessage(lastError));
+  const fallback = buildFallbackAssessment(candidateName, transcript);
+  return NextResponse.json(fallback);
 }

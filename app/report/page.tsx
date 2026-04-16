@@ -1,683 +1,662 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { motion } from "framer-motion";
-import {
-  RadarChart,
-  Radar,
-  PolarGrid,
-  PolarAngleAxis,
-  PolarRadiusAxis,
-  ResponsiveContainer,
-  Tooltip,
-} from "recharts";
 import {
   CheckCircle,
   XCircle,
-  AlertCircle,
+  AlertTriangle,
+  TrendingUp,
+  MessageSquare,
+  Heart,
+  Clock,
+  Layers,
+  BookOpen,
+  ChevronRight,
   Download,
-  RotateCcw,
-  Star,
-  Quote,
-  Sparkles,
-  FileText,
-  BarChart2,
-  Moon,
   Sun,
+  Moon,
+  BrainCircuit,
+  Star,
+  ArrowLeft,
+  Info,
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-interface Dimension {
+type DimensionScore = {
   score: number;
-  evidence: string;
-}
-
-interface Assessment {
-  candidate_name: string;
-  recommendation: "PROCEED" | "CONSIDER" | "REJECT";
-  overall_score: number;
-  summary: string;
-  dimensions: {
-    communication_clarity: Dimension;
-    warmth: Dimension;
-    patience: Dimension;
-    ability_to_simplify: Dimension;
-    english_fluency: Dimension;
-  };
-  strengths: string[];
-  concerns: string[];
-  interviewer_notes: string;
-  source?: "groq" | "fallback";
-  fallbackReason?: string;
-}
-
-type ThemeMode = "dark" | "light";
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const DIMENSION_LABELS: Record<string, string> = {
-  communication_clarity: "Clarity",
-  warmth: "Warmth",
-  patience: "Patience",
-  ability_to_simplify: "Simplicity",
-  english_fluency: "Fluency",
+  label: string;
+  feedback: string;
+  highlights: string[];
 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function cn(...classes: Array<string | false | null | undefined>) {
-  return classes.filter(Boolean).join(" ");
-}
-
-function clampScore(score: number) {
-  return Math.max(1, Math.min(10, Math.round(score) || 1));
-}
-
-function isFallbackAssessment(assessment: Assessment): boolean {
-  return assessment.source === "fallback";
-}
-
-function computeConfidence(assessment: Assessment): { label: string; pct: number; isLow: boolean } {
-  if (assessment.source === "fallback") {
-    return { label: "Low — fallback mode", pct: 40, isLow: true };
-  }
-
-  const dimEntries = Object.values(assessment.dimensions ?? {});
-
-  if (dimEntries.length === 0) {
-    return { label: "Low", pct: 35, isLow: true };
-  }
-
-  const dimScores = dimEntries.map((d) => clampScore(d.score));
-  const avg = dimScores.reduce((a, b) => a + b, 0) / dimScores.length;
-  const spread = dimScores.length > 1
-    ? Math.max(...dimScores) - Math.min(...dimScores)
-    : 0;
-
-  const evidenceCount = dimEntries.filter(
-    (d) => d.evidence && d.evidence.length > 20 && d.evidence !== "Insufficient evidence from transcript"
-  ).length;
-
-  let score = 50;
-  score += (evidenceCount / dimEntries.length) * 30;
-  score -= spread * 2;
-  score += Math.min(avg - 1, 9) * 2;
-
-  const pct = Math.round(Math.max(30, Math.min(95, score)));
-
-  if (pct >= 75) return { label: "High", pct, isLow: false };
-  if (pct >= 55) return { label: "Moderate", pct, isLow: false };
-  return { label: "Low", pct, isLow: true };
-}
-
-function getScoreTextColor(score: number, isDark: boolean) {
-  if (score >= 7) return isDark ? "text-emerald-300" : "text-emerald-700";
-  if (score >= 5) return isDark ? "text-amber-300" : "text-amber-700";
-  return isDark ? "text-rose-300" : "text-rose-700";
-}
-
-function getScoreBarColor(score: number) {
-  if (score >= 7) return "bg-emerald-500";
-  if (score >= 5) return "bg-amber-500";
-  return "bg-rose-500";
-}
-
-function getRecommendationConfig(
-  recommendation: Assessment["recommendation"],
-  isDark: boolean
-) {
-  const darkMap = {
-    PROCEED: { icon: CheckCircle, color: "text-emerald-300", bg: "bg-emerald-400/10 border-emerald-400/20", label: "Proceed to Next Round" },
-    CONSIDER: { icon: AlertCircle, color: "text-amber-300", bg: "bg-amber-400/10 border-amber-400/20", label: "Consider with Review" },
-    REJECT: { icon: XCircle, color: "text-rose-300", bg: "bg-rose-400/10 border-rose-400/20", label: "Do Not Proceed" },
+type AssessmentResult = {
+  candidateName: string;
+  overallScore: number;
+  overallLabel: string;
+  summary: string;
+  recommendation: "Proceed" | "Consider" | "Decline";
+  dimensions: {
+    communication: DimensionScore;
+    warmth: DimensionScore;
+    patience: DimensionScore;
+    simplification: DimensionScore;
+    fluency: DimensionScore;
   };
-  const lightMap = {
-    PROCEED: { icon: CheckCircle, color: "text-emerald-700", bg: "bg-emerald-50 border-emerald-200", label: "Proceed to Next Round" },
-    CONSIDER: { icon: AlertCircle, color: "text-amber-700", bg: "bg-amber-50 border-amber-200", label: "Consider with Review" },
-    REJECT: { icon: XCircle, color: "text-rose-700", bg: "bg-rose-50 border-rose-200", label: "Do Not Proceed" },
+  strengths: string[];
+  improvements: string[];
+  generatedAt: string;
+  _fallback?: boolean;
+};
+
+// ─── Default fallback (last resort — prevents blank page) ─────────────────────
+
+function buildEmptyAssessment(name: string): AssessmentResult {
+  const score = 5.5;
+  const dim = (label: string): DimensionScore => ({
+    score,
+    label: "Adequate",
+    feedback: `${label} data was not captured. Please review the transcript manually.`,
+    highlights: ["Manual review recommended"],
+  });
+  return {
+    candidateName: name || "Candidate",
+    overallScore: score,
+    overallLabel: "Adequate",
+    summary: "The interview was completed but detailed assessment data was not available. Please review the transcript manually.",
+    recommendation: "Consider",
+    dimensions: {
+      communication: dim("Communication"),
+      warmth: dim("Warmth"),
+      patience: dim("Patience"),
+      simplification: dim("Simplification"),
+      fluency: dim("Fluency"),
+    },
+    strengths: ["Completed the full interview process"],
+    improvements: ["Detailed assessment unavailable — manual review required"],
+    generatedAt: new Date().toISOString(),
+    _fallback: true,
   };
-  return isDark ? darkMap[recommendation] : lightMap[recommendation];
 }
 
-// FIX: Use indexOf to split only on the FIRST colon — preserves colons in content
-// (e.g. "ratio 3:4", "time 10:30 AM", "Maya: Great, the ratio is 3:1 here").
-function parseTranscriptLine(line: string): { speaker: string; content: string } | null {
-  const colonIdx = line.indexOf(":");
-  if (colonIdx === -1) return null;
-  const speaker = line.slice(0, colonIdx).trim();
-  const content = line.slice(colonIdx + 1).trim();
-  if (!speaker || content.length < 1) return null;
-  return { speaker, content };
+/**
+ * Safely parse and normalize an assessment result from any source.
+ * Never throws — always returns a valid AssessmentResult.
+ */
+function safeParseAssessment(raw: unknown, fallbackName: string): AssessmentResult {
+  if (!raw || typeof raw !== "object") return buildEmptyAssessment(fallbackName);
+
+  const p = raw as Record<string, unknown>;
+  const candidateName = typeof p.candidateName === "string" && p.candidateName.trim()
+    ? p.candidateName.trim()
+    : fallbackName || "Candidate";
+
+  const clampScore = (n: unknown, def = 5): number => {
+    const num = typeof n === "number" ? n : parseFloat(String(n));
+    if (isNaN(num)) return def;
+    return Math.min(Math.max(Math.round(num * 10) / 10, 1), 10);
+  };
+
+  const scoreLabel = (s: number): string => {
+    if (s >= 9) return "Exceptional";
+    if (s >= 8) return "Excellent";
+    if (s >= 7) return "Good";
+    if (s >= 6) return "Satisfactory";
+    if (s >= 5) return "Adequate";
+    if (s >= 4) return "Needs Improvement";
+    return "Poor";
+  };
+
+  const normDim = (d: unknown, def = 5): DimensionScore => {
+    if (!d || typeof d !== "object") {
+      return { score: def, label: scoreLabel(def), feedback: "Not assessed.", highlights: [] };
+    }
+    const obj = d as Record<string, unknown>;
+    const score = clampScore(obj.score, def);
+    return {
+      score,
+      label: typeof obj.label === "string" && obj.label ? obj.label : scoreLabel(score),
+      feedback: typeof obj.feedback === "string" && obj.feedback ? obj.feedback : "No detailed feedback available.",
+      highlights: Array.isArray(obj.highlights)
+        ? (obj.highlights as unknown[]).filter((h): h is string => typeof h === "string" && h.trim().length > 0)
+        : [],
+    };
+  };
+
+  const dims = (p.dimensions && typeof p.dimensions === "object" ? p.dimensions : {}) as Record<string, unknown>;
+  const overallScore = clampScore(p.overallScore, 5);
+
+  const rec = p.recommendation;
+  const recommendation: "Proceed" | "Consider" | "Decline" =
+    rec === "Proceed" ? "Proceed" : rec === "Decline" ? "Decline" : "Consider";
+
+  return {
+    candidateName,
+    overallScore,
+    overallLabel: typeof p.overallLabel === "string" && p.overallLabel ? p.overallLabel : scoreLabel(overallScore),
+    summary: typeof p.summary === "string" && p.summary ? p.summary : `${candidateName} completed the screening interview.`,
+    recommendation,
+    dimensions: {
+      communication: normDim(dims.communication, overallScore),
+      warmth: normDim(dims.warmth, overallScore),
+      patience: normDim(dims.patience, overallScore),
+      simplification: normDim(dims.simplification, overallScore),
+      fluency: normDim(dims.fluency, overallScore),
+    },
+    strengths: Array.isArray(p.strengths)
+      ? (p.strengths as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      : ["Completed the interview"],
+    improvements: Array.isArray(p.improvements)
+      ? (p.improvements as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      : [],
+    generatedAt: typeof p.generatedAt === "string" ? p.generatedAt : new Date().toISOString(),
+    _fallback: p._fallback === true,
+  };
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Design tokens ────────────────────────────────────────────────────────────
+
+const FONTS = `
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Serif+Display:ital@0;1&display=swap');
+*,*::before,*::after{box-sizing:border-box;}
+html,body{margin:0;padding:0;font-family:"DM Sans",system-ui,sans-serif;}
+`;
+
+function getTokens(isDark: boolean) {
+  return isDark ? {
+    pageBg: "#080C14", pageBg2: "#0C1220",
+    gridLine: "rgba(255,255,255,0.03)",
+    text: "#F0F4FF", textSoft: "rgba(220,228,255,0.68)", textMuted: "rgba(220,228,255,0.38)",
+    surface: "#0E1628", surfaceElevated: "#111E35", inset: "#0A1120",
+    border: "rgba(255,255,255,0.08)", borderStrong: "rgba(255,255,255,0.13)",
+    accent: "#4F7BFF", accentAlt: "#8B5CF6", accentGlow: "rgba(79,123,255,0.16)",
+    accentRing: "rgba(79,123,255,0.22)", accentText: "#7BA8FF",
+    success: "#10D9A0", successBg: "rgba(16,217,160,0.08)", successBorder: "rgba(16,217,160,0.18)",
+    danger: "#F87171", dangerBg: "rgba(248,113,113,0.10)", dangerBorder: "rgba(248,113,113,0.22)",
+    warning: "#FBBF24", warningBg: "rgba(251,191,36,0.10)", warningBorder: "rgba(251,191,36,0.22)",
+    topbar: "rgba(8,12,20,0.88)",
+    shadow: "0 24px 64px rgba(0,0,0,0.50)", shadowMd: "0 8px 28px rgba(0,0,0,0.28)",
+    heroGlow1: "rgba(79,123,255,0.10)", heroGlow2: "rgba(139,92,246,0.07)",
+  } : {
+    pageBg: "#F4F6FB", pageBg2: "#EBF0FF",
+    gridLine: "rgba(13,21,38,0.04)",
+    text: "#0D1526", textSoft: "rgba(13,21,38,0.64)", textMuted: "rgba(13,21,38,0.38)",
+    surface: "#FFFFFF", surfaceElevated: "#FFFFFF", inset: "#F5F8FF",
+    border: "rgba(13,21,38,0.08)", borderStrong: "rgba(13,21,38,0.14)",
+    accent: "#3B63E8", accentAlt: "#7C3AED", accentGlow: "rgba(59,99,232,0.10)",
+    accentRing: "rgba(59,99,232,0.14)", accentText: "#3B63E8",
+    success: "#059669", successBg: "rgba(5,150,105,0.07)", successBorder: "rgba(5,150,105,0.18)",
+    danger: "#DC2626", dangerBg: "rgba(220,38,38,0.06)", dangerBorder: "rgba(220,38,38,0.18)",
+    warning: "#D97706", warningBg: "rgba(217,119,6,0.07)", warningBorder: "rgba(217,119,6,0.18)",
+    topbar: "rgba(244,246,251,0.90)",
+    shadow: "0 24px 64px rgba(13,21,38,0.09)", shadowMd: "0 8px 28px rgba(13,21,38,0.07)",
+    heroGlow1: "rgba(59,99,232,0.08)", heroGlow2: "rgba(124,58,237,0.05)",
+  };
+}
+
+// ─── Dimension config ─────────────────────────────────────────────────────────
+
+const DIM_CONFIG: Array<{
+  key: keyof AssessmentResult["dimensions"];
+  label: string;
+  Icon: React.ElementType;
+  description: string;
+}> = [
+  { key: "communication", label: "Communication", Icon: MessageSquare, description: "Clarity and logical structure of expression" },
+  { key: "warmth", label: "Warmth & Empathy", Icon: Heart, description: "Encouragement, emotional intelligence, tone" },
+  { key: "patience", label: "Patience", Icon: Clock, description: "Handling struggling students and difficult moments" },
+  { key: "simplification", label: "Simplification", Icon: Layers, description: "Use of analogies, examples, child-appropriate language" },
+  { key: "fluency", label: "English Fluency", Icon: BookOpen, description: "Grammar, vocabulary, natural expression" },
+];
+
+// ─── Score ring component ─────────────────────────────────────────────────────
+
+function ScoreRing({ score, size = 140, T }: { score: number; size?: number; T: ReturnType<typeof getTokens> }) {
+  const r = (size - 16) / 2;
+  const circ = 2 * Math.PI * r;
+  const fill = (score / 10) * circ;
+  const color = score >= 7 ? T.success : score >= 5 ? T.warning : T.danger;
+
+  return (
+    <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={T.border} strokeWidth={8} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r}
+        fill="none" stroke={color} strokeWidth={8}
+        strokeDasharray={circ}
+        strokeDashoffset={circ - fill}
+        strokeLinecap="round"
+        style={{ transition: "stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1)" }}
+      />
+    </svg>
+  );
+}
+
+// ─── Gauge bar ────────────────────────────────────────────────────────────────
+
+function GaugeBar({ score, T }: { score: number; T: ReturnType<typeof getTokens> }) {
+  const color = score >= 7 ? T.success : score >= 5 ? T.warning : T.danger;
+  return (
+    <div style={{ height: 6, borderRadius: 999, background: T.border, overflow: "hidden", flex: 1 }}>
+      <div style={{
+        height: "100%", width: `${(score / 10) * 100}%`,
+        background: color, borderRadius: 999,
+        transition: "width 1s cubic-bezier(0.4,0,0.2,1)",
+      }} />
+    </div>
+  );
+}
+
+// ─── Recommendation badge ─────────────────────────────────────────────────────
+
+function RecBadge({ rec, T }: { rec: "Proceed" | "Consider" | "Decline"; T: ReturnType<typeof getTokens> }) {
+  const config = {
+    Proceed: { icon: <CheckCircle size={16} />, color: T.success, bg: T.successBg, border: T.successBorder },
+    Consider: { icon: <AlertTriangle size={16} />, color: T.warning, bg: T.warningBg, border: T.warningBorder },
+    Decline: { icon: <XCircle size={16} />, color: T.danger, bg: T.dangerBg, border: T.dangerBorder },
+  }[rec];
+
+  return (
+    <div style={{
+      display: "inline-flex", alignItems: "center", gap: 8,
+      padding: "8px 16px", borderRadius: 999,
+      border: `1px solid ${config.border}`, background: config.bg, color: config.color,
+      fontSize: 14, fontWeight: 700,
+    }}>
+      {config.icon} {rec}
+    </div>
+  );
+}
+
+// ─── Main Report Page ─────────────────────────────────────────────────────────
 
 export default function ReportPage() {
   const router = useRouter();
-  const [assessment, setAssessment] = useState<Assessment | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"overview" | "details" | "transcript">("overview");
-  const [transcript, setTranscript] = useState("");
-  const [theme, setTheme] = useState<ThemeMode>("dark");
+  const [assessment, setAssessment] = useState<AssessmentResult | null>(null);
+  const [transcript, setTranscript] = useState<string>("");
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [loadError, setLoadError] = useState<string>("");
+  const [showTranscript, setShowTranscript] = useState(false);
+
+  const T = getTokens(theme === "dark");
 
   useEffect(() => {
-    const savedTheme = localStorage.getItem("theme_mode") as ThemeMode | null;
-    if (savedTheme === "light" || savedTheme === "dark") setTheme(savedTheme);
+    const savedTheme = localStorage.getItem("maya_theme") as "dark" | "light" | null;
+    if (savedTheme) setTheme(savedTheme);
+
+    // Load assessment — never throw, always recover
+    const loadAssessment = () => {
+      const fallbackName = localStorage.getItem("candidate_name") || "Candidate";
+
+      try {
+        const raw = localStorage.getItem("assessment_result");
+        if (!raw || !raw.trim()) {
+          console.warn("report: no assessment_result in localStorage");
+          setLoadError("Assessment data not found. Showing a default report.");
+          setAssessment(buildEmptyAssessment(fallbackName));
+          return;
+        }
+
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(raw);
+        } catch (parseErr) {
+          console.error("report: JSON.parse failed:", parseErr, "raw:", raw.slice(0, 200));
+          setLoadError("Assessment data was corrupted. Showing a default report.");
+          setAssessment(buildEmptyAssessment(fallbackName));
+          return;
+        }
+
+        // Normalize — never throws
+        const result = safeParseAssessment(parsed, fallbackName);
+        setAssessment(result);
+
+        if (result._fallback) {
+          setLoadError("Assessment was generated in fallback mode — scores are approximate.");
+        }
+      } catch (err) {
+        console.error("report: unexpected error:", err);
+        setLoadError("An unexpected error occurred loading the report.");
+        setAssessment(buildEmptyAssessment(fallbackName));
+      }
+
+      // Load transcript separately — non-critical
+      try {
+        const t = localStorage.getItem("interview_transcript");
+        if (t) setTranscript(t);
+      } catch { /* not critical */ }
+    };
+
+    loadAssessment();
   }, []);
 
-  useEffect(() => { localStorage.setItem("theme_mode", theme); }, [theme]);
-
-  useEffect(() => {
-    const result = localStorage.getItem("assessment_result");
-    const savedTranscript = localStorage.getItem("interview_transcript");
-    if (result) {
-      try { setAssessment(JSON.parse(result) as Assessment); } catch { setAssessment(null); }
-      setTranscript(savedTranscript ?? "");
-    }
-    setLoading(false);
-  }, []);
-
-  const isDark = theme === "dark";
-
-  const T = useMemo(
-    () =>
-      isDark
-        ? {
-            page: "bg-[radial-gradient(circle_at_top,rgba(124,58,237,0.12),transparent_24%),linear-gradient(180deg,#060D1A_0%,#081120_42%,#060D1A_100%)] text-white",
-            header: "bg-[#081221]/78 border-white/10 backdrop-blur-xl",
-            card: "border border-white/10 bg-[linear-gradient(180deg,rgba(16,26,45,0.98)_0%,rgba(10,18,34,0.98)_100%)] shadow-[0_20px_56px_rgba(2,8,23,0.42)]",
-            panel: "border border-white/10 bg-[linear-gradient(180deg,rgba(12,22,40,0.95)_0%,rgba(9,18,34,0.95)_100%)]",
-            soft: "text-white/68",
-            muted: "text-white/48",
-            strong: "text-white",
-            chip: "border-violet-400/20 bg-violet-400/10 text-violet-300",
-            buttonSecondary: "border-white/12 bg-white/[0.04] text-white/75 hover:bg-white/[0.07] hover:text-white",
-            progressTrack: "bg-white/10",
-            quote: "bg-white/[0.03] border-white/10",
-            transcriptMaya: "bg-violet-500/10 border-violet-400/20",
-            transcriptCandidate: "bg-white/[0.03] border-white/10",
-            emptyCard: "border border-white/10 bg-[linear-gradient(180deg,rgba(16,26,45,0.98)_0%,rgba(10,18,34,0.98)_100%)]",
-            summaryPanel: "border border-white/10 bg-[linear-gradient(180deg,rgba(10,20,36,0.94)_0%,rgba(8,17,32,0.94)_100%)]",
-            toggleBg: "bg-white/[0.04]",
-            toggleText: "text-white/70",
-          }
-        : {
-            page: "bg-[radial-gradient(circle_at_top,rgba(124,58,237,0.08),transparent_22%),linear-gradient(180deg,#F8FAFF_0%,#F4F7FB_55%,#EEF3FA_100%)] text-slate-900",
-            header: "bg-white/84 border-slate-200 backdrop-blur-xl",
-            card: "border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,1)_0%,rgba(248,250,253,1)_100%)] shadow-[0_16px_40px_rgba(15,23,42,0.08)]",
-            panel: "border border-slate-200 bg-[linear-gradient(180deg,rgba(248,250,252,1)_0%,rgba(255,255,255,1)_100%)]",
-            soft: "text-slate-600",
-            muted: "text-slate-500",
-            strong: "text-slate-900",
-            chip: "border-violet-200 bg-violet-50 text-violet-700",
-            buttonSecondary: "border-slate-300/80 bg-slate-100 text-slate-700 hover:bg-slate-200 hover:text-slate-900",
-            progressTrack: "bg-slate-200",
-            quote: "bg-slate-50 border-slate-200",
-            transcriptMaya: "bg-violet-50 border-violet-200",
-            transcriptCandidate: "bg-white border-slate-200",
-            emptyCard: "border border-slate-200 bg-[linear-gradient(180deg,rgba(255,255,255,1)_0%,rgba(248,250,253,1)_100%)]",
-            summaryPanel: "border border-slate-200 bg-[linear-gradient(180deg,rgba(248,250,252,1)_0%,rgba(255,255,255,1)_100%)]",
-            toggleBg: "bg-slate-100",
-            toggleText: "text-slate-700",
-          },
-    [isDark]
-  );
-
-  const escapeHtml = (str: string): string => {
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
+  const toggleTheme = () => {
+    setTheme((t) => {
+      const next = t === "dark" ? "light" : "dark";
+      localStorage.setItem("maya_theme", next);
+      return next;
+    });
   };
 
   const handleDownload = () => {
     if (!assessment) return;
+    const lines: string[] = [
+      `CUEMATH TUTOR SCREENING REPORT`,
+      `${"=".repeat(50)}`,
+      `Candidate: ${assessment.candidateName}`,
+      `Date: ${new Date(assessment.generatedAt).toLocaleString()}`,
+      `Overall Score: ${assessment.overallScore}/10 — ${assessment.overallLabel}`,
+      `Recommendation: ${assessment.recommendation}`,
+      ``,
+      `SUMMARY`,
+      `-`.repeat(40),
+      assessment.summary,
+      ``,
+      `DIMENSION SCORES`,
+      `-`.repeat(40),
+      ...DIM_CONFIG.map((d) => {
+        const dim = assessment.dimensions[d.key];
+        return `${d.label}: ${dim.score}/10 — ${dim.label}\n${dim.feedback}`;
+      }),
+      ``,
+      `STRENGTHS`,
+      `-`.repeat(40),
+      ...assessment.strengths.map((s) => `• ${s}`),
+      ``,
+      `AREAS FOR IMPROVEMENT`,
+      `-`.repeat(40),
+      ...assessment.improvements.map((s) => `• ${s}`),
+      ``,
+      assessment._fallback ? `[Note: Generated in fallback mode — manual review recommended]` : "",
+      ``,
+      `Generated by Cuemath Maya AI Screener`,
+    ];
 
-    const dimRows = Object.entries(assessment.dimensions ?? {}).map(([key, val]) => {
-      const label = DIMENSION_LABELS[key] ?? key;
-      const score = clampScore(val.score);
-      const color = score >= 7 ? "#10b981" : score >= 5 ? "#f59e0b" : "#ef4444";
-      return `
-        <tr>
-          <td style="padding:10px 14px;font-weight:600;color:#334155">${escapeHtml(label)}</td>
-          <td style="padding:10px 14px;text-align:center;font-weight:700;color:${color}">${score}/10</td>
-          <td style="padding:10px 14px;color:#64748b;font-style:italic">&ldquo;${escapeHtml(val.evidence || "No evidence captured")}&rdquo;</td>
-        </tr>`;
-    }).join("");
+    if (transcript) {
+      lines.push(``, `INTERVIEW TRANSCRIPT`, `=`.repeat(50), transcript);
+    }
 
-    const strengthItems = (assessment.strengths || []).map((s) => `<li style="margin:4px 0">${escapeHtml(s)}</li>`).join("");
-    const concernItems = (assessment.concerns || []).map((c) => `<li style="margin:4px 0">${escapeHtml(c)}</li>`).join("");
-
-    const recColor = assessment.recommendation === "PROCEED"
-      ? "#10b981" : assessment.recommendation === "CONSIDER" ? "#f59e0b" : "#ef4444";
-
-    const safeName = escapeHtml(assessment.candidate_name);
-    const safeSummary = escapeHtml(assessment.summary);
-    const safeNotes = escapeHtml(assessment.interviewer_notes);
-
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cuemath Assessment &mdash; ${safeName}</title>
-<style>
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;margin:0;padding:40px;background:#f8faff;color:#1e293b;max-width:860px;margin:0 auto}
-  h1{font-size:2rem;font-weight:700;margin:0 0 4px}
-  .meta{color:#64748b;font-size:0.9rem;margin-bottom:32px}
-  .section{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:24px;margin-bottom:20px;box-shadow:0 2px 8px rgba(0,0,0,0.04)}
-  h2{font-size:1rem;font-weight:700;color:#7c3aed;margin:0 0 14px;text-transform:uppercase;letter-spacing:0.08em}
-  .badge{display:inline-block;padding:6px 16px;border-radius:999px;font-weight:700;font-size:0.9rem;color:#fff;background:${recColor};margin-bottom:16px}
-  .score-big{font-size:3rem;font-weight:800;color:${recColor};line-height:1}
-  table{width:100%;border-collapse:collapse}
-  th{background:#f1f5f9;padding:10px 14px;text-align:left;font-size:0.8rem;text-transform:uppercase;letter-spacing:0.06em;color:#94a3b8}
-  tr:nth-child(even){background:#f8faff}
-  ul{margin:0;padding-left:20px;color:#475569}
-  .note{color:#64748b;font-size:0.88rem;margin-top:24px;padding-top:16px;border-top:1px solid #e2e8f0}
-  .transcript-maya{background:#f5f3ff;border-left:3px solid #7c3aed;padding:10px 14px;margin:8px 0;border-radius:0 8px 8px 0}
-  .transcript-candidate{background:#f8faff;border-left:3px solid #94a3b8;padding:10px 14px;margin:8px 0;border-radius:0 8px 8px 0}
-  .speaker{font-weight:700;font-size:0.8rem;margin-bottom:4px}
-  .maya-name{color:#7c3aed}
-  .candidate-name{color:#475569}
-</style>
-</head>
-<body>
-  <h1>${safeName}</h1>
-  <p class="meta">Cuemath AI Tutor Screener &middot; ${new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })}</p>
-
-  <div class="section">
-    <h2>Recommendation</h2>
-    <div class="badge">${escapeHtml(assessment.recommendation)}</div>
-    <div class="score-big">${clampScore(assessment.overall_score)}<span style="font-size:1.2rem;font-weight:400;color:#94a3b8">/10</span></div>
-    <p style="margin:16px 0 0;color:#475569;line-height:1.7">${safeSummary}</p>
-  </div>
-
-  <div class="section">
-    <h2>Dimension Scores &amp; Evidence</h2>
-    <table>
-      <thead><tr><th>Dimension</th><th style="text-align:center">Score</th><th>Evidence</th></tr></thead>
-      <tbody>${dimRows}</tbody>
-    </table>
-  </div>
-
-  <div class="section">
-    <h2>Strengths</h2>
-    <ul>${strengthItems || "<li>None noted</li>"}</ul>
-  </div>
-
-  <div class="section">
-    <h2>Areas of Concern</h2>
-    <ul>${concernItems || "<li>No major concerns</li>"}</ul>
-  </div>
-
-  <div class="section">
-    <h2>Interviewer Notes</h2>
-    <p style="color:#475569;line-height:1.7;margin:0">${safeNotes}</p>
-  </div>
-
-  <div class="section">
-    <h2>Full Transcript</h2>
-    ${transcript
-      ? transcript.split("\n\n").filter(Boolean).map((line) => {
-          const isMaya = line.startsWith("Maya:");
-          const colonIdx = line.indexOf(":");
-          const content = colonIdx !== -1 ? escapeHtml(line.slice(colonIdx + 1).trim()) : escapeHtml(line);
-          return `<div class="${isMaya ? "transcript-maya" : "transcript-candidate"}">
-            <div class="speaker ${isMaya ? "maya-name" : "candidate-name"}">${isMaya ? "Maya" : "Candidate"}</div>
-            ${content}
-          </div>`;
-        }).join("")
-      : "<p style='color:#94a3b8'>No transcript available.</p>"}
-  </div>
-
-  <p class="note">Generated by Cuemath AI Tutor Screener. This report is confidential and intended for internal hiring use only.</p>
-</body>
-</html>`;
-
-    const blob = new Blob([html], { type: "text/html" });
+    const blob = new Blob([lines.join("\n")], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${assessment.candidate_name.replace(/[^a-zA-Z0-9\s]/g, "").replace(/\s+/g, "_")}_Cuemath_Assessment.html`;
+    a.download = `cuemath-report-${assessment.candidateName.replace(/\s+/g, "-").toLowerCase()}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  if (loading) {
-    return (
-      <div className={cn("min-h-screen flex items-center justify-center", T.page)}>
-        <div className="text-center">
-          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-400 shadow-[0_14px_34px_rgba(124,58,237,0.28)]">
-            <span className="text-2xl font-bold text-white">M</span>
-          </div>
-          <p className={cn("text-sm", T.soft)}>Generating assessment report...</p>
-        </div>
-      </div>
-    );
-  }
+  // ─── CSS ───────────────────────────────────────────────────────────────────
+
+  const css = `
+    .rp-shell { min-height:100vh; background:linear-gradient(160deg,${T.pageBg} 0%,${T.pageBg2} 100%); color:${T.text}; font-family:"DM Sans",system-ui,sans-serif; }
+    .rp-grid::before { content:""; position:absolute; inset:0; pointer-events:none; z-index:0; background-image:linear-gradient(${T.gridLine} 1px,transparent 1px),linear-gradient(90deg,${T.gridLine} 1px,transparent 1px); background-size:48px 48px; }
+    .rp-topbar { position:sticky; top:0; z-index:100; height:62px; display:flex; align-items:center; border-bottom:1px solid ${T.border}; background:${T.topbar}; backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px); }
+    .rp-container { max-width:1200px; margin:0 auto; padding:0 28px; width:100%; }
+    .rp-brand { display:flex; align-items:center; gap:10px; }
+    .rp-brandmark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,${T.accent},${T.accentAlt}); display:grid; place-items:center; color:#fff; }
+    .rp-brand-name { font-size:15px; font-weight:700; letter-spacing:-0.02em; color:${T.text}; }
+    .rp-brand-sub { font-size:10px; text-transform:uppercase; letter-spacing:0.10em; color:${T.textMuted}; margin-top:1px; }
+    .rp-theme-btn { width:36px; height:36px; border-radius:10px; border:1px solid ${T.border}; background:transparent; color:${T.textSoft}; display:grid; place-items:center; cursor:pointer; transition:border-color 0.15s,background 0.15s; }
+    .rp-theme-btn:hover { border-color:${T.borderStrong}; background:${T.surfaceElevated}; }
+    .rp-card { border:1px solid ${T.border}; border-radius:20px; background:${T.surface}; box-shadow:${T.shadow}; }
+    .rp-panel { border:1px solid ${T.border}; border-radius:16px; background:${T.surfaceElevated}; }
+    .rp-inset { border:1px solid ${T.border}; border-radius:12px; background:${T.inset}; }
+    .rp-btn-primary { display:inline-flex; align-items:center; justify-content:center; gap:8px; border:0; border-radius:12px; padding:0 20px; height:44px; font-size:14px; font-weight:700; font-family:inherit; color:#fff; cursor:pointer; background:linear-gradient(135deg,${T.accent} 0%,${T.accentAlt} 100%); box-shadow:0 10px 28px ${T.accentRing}; transition:transform 0.15s,box-shadow 0.15s; }
+    .rp-btn-primary:hover { transform:translateY(-1px); box-shadow:0 16px 36px ${T.accentRing}; }
+    .rp-btn-secondary { display:inline-flex; align-items:center; gap:7px; border:1px solid ${T.border}; border-radius:12px; padding:0 18px; height:42px; font-size:13px; font-weight:600; font-family:inherit; color:${T.textSoft}; cursor:pointer; background:transparent; transition:border-color 0.15s,color 0.15s,background 0.15s; }
+    .rp-btn-secondary:hover { border-color:${T.borderStrong}; color:${T.text}; background:${T.surfaceElevated}; }
+    .rp-chip-label { font-size:10px; font-weight:800; text-transform:uppercase; letter-spacing:0.12em; color:${T.textMuted}; }
+    .rp-dim-card { border:1px solid ${T.border}; border-radius:16px; background:${T.surfaceElevated}; padding:20px; transition:border-color 0.2s,box-shadow 0.2s; }
+    .rp-dim-card:hover { border-color:${T.borderStrong}; box-shadow:${T.shadowMd}; }
+    .rp-warn-box { border:1px solid ${T.warningBorder}; background:${T.warningBg}; border-radius:12px; padding:12px 16px; font-size:13px; color:${T.warning}; display:flex; align-items:flex-start; gap:10px; }
+    .rp-transcript-box { border:1px solid ${T.border}; border-radius:12px; background:${T.inset}; padding:20px; font-size:13px; line-height:1.8; color:${T.textSoft}; white-space:pre-wrap; max-height:480px; overflow-y:auto; font-family:monospace; }
+    @keyframes rp-fadein { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:translateY(0)} }
+    .rp-fadein { animation:rp-fadein 0.5s ease both; }
+    .rp-toggle-btn { border:0; background:none; cursor:pointer; color:${T.accentText}; font-size:13px; font-weight:600; font-family:inherit; display:flex; align-items:center; gap:6px; padding:0; }
+    .rp-toggle-btn:hover { text-decoration:underline; }
+  `;
+
+  // ─── Loading state ─────────────────────────────────────────────────────────
 
   if (!assessment) {
     return (
-      <div className={cn("min-h-screen flex items-center justify-center px-5", T.page)}>
-        <div className={cn("w-full max-w-md rounded-[30px] p-8 text-center", T.emptyCard)}>
-          <p className={cn("mb-4 text-sm", T.soft)}>No assessment found.</p>
-          <button onClick={() => router.push("/")} className="rounded-[18px] bg-gradient-to-r from-violet-600 to-fuchsia-500 px-6 py-3 text-sm font-semibold text-white shadow-[0_14px_30px_rgba(124,58,237,0.18)] transition hover:from-violet-500 hover:to-fuchsia-400">
-            Start New Interview
-          </button>
+      <>
+        <style dangerouslySetInnerHTML={{ __html: FONTS + css }} />
+        <div className="rp-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ width: 48, height: 48, border: `3px solid ${T.accent}`, borderTopColor: "transparent", borderRadius: "50%", animation: "spin 0.8s linear infinite", margin: "0 auto 20px" }} />
+            <p style={{ color: T.textSoft, fontSize: 14 }}>Loading your report…</p>
+          </div>
+          <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
         </div>
-      </div>
+      </>
     );
   }
 
-  // ── Derived values ───────────────────────────────────────────────────────────
+  // ─── Score color ───────────────────────────────────────────────────────────
 
-  const recommendationConfig = getRecommendationConfig(assessment.recommendation, isDark);
-  const RecommendIcon = recommendationConfig.icon;
-  const fallbackMode = isFallbackAssessment(assessment);
-  const confidence = computeConfidence(assessment);
+  const scoreColor = assessment.overallScore >= 7 ? T.success : assessment.overallScore >= 5 ? T.warning : T.danger;
 
-  // FIX: guard against missing/empty dimensions before mapping
-  const dimensionEntries = Object.entries(assessment.dimensions ?? {});
-
-  const radarData = dimensionEntries.map(([key, val]) => ({
-    dimension: DIMENSION_LABELS[key] ?? key,
-    score: clampScore(val.score),
-    fullMark: 10,
-  }));
-
-  // FIX: guard for empty dimensions
-  const dimValues = Object.values(assessment.dimensions ?? {});
-  const averageDimensionScore = dimValues.length > 0
-    ? Math.max(1, Math.min(10, Math.round(
-        dimValues.reduce((sum, d) => sum + clampScore(d.score), 0) / dimValues.length
-      )))
-    : 1;
-
-  const transcriptLines = transcript
-    .split("\n\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const parsed = parseTranscriptLine(line);
-      if (!parsed) return null;
-      return { ...parsed, isMaya: parsed.speaker === "Maya" };
-    })
-    .filter((entry): entry is { speaker: string; content: string; isMaya: boolean } => entry !== null);
+  // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className={cn("min-h-screen", T.page)}>
-      {/* Header */}
-      <header className={cn("sticky top-0 z-20 border-b", T.header)}>
-        <div className="mx-auto flex w-full max-w-[1500px] items-center justify-between px-6 py-4 xl:px-8">
-          <div className="flex items-center gap-3.5">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-600 to-fuchsia-500 shadow-[0_12px_28px_rgba(124,58,237,0.26)]">
-              <Star size={16} className="fill-white text-white" />
-            </div>
-            <div>
-              <p className={cn("text-[18px] font-semibold tracking-tight", T.strong)}>Cuemath</p>
-              <p className={cn("text-xs", T.muted)}>Assessment Report</p>
-            </div>
-          </div>
+    <>
+      <style dangerouslySetInnerHTML={{ __html: FONTS + css }} />
 
-          <div className="flex items-center gap-3">
-            <div className={cn("hidden rounded-full border px-4 py-2 text-xs font-medium md:block", T.buttonSecondary)}>
-              AI Interview Workflow
-            </div>
+      <div className="rp-shell rp-grid" style={{ position: "relative" }}>
+        <div className="rp-grid" style={{ position: "absolute", inset: 0 }} />
 
-            <button
-              onClick={() => setTheme((p) => (p === "dark" ? "light" : "dark"))}
-              type="button"
-              aria-label="Toggle theme"
-              className={cn("flex h-10 w-10 items-center justify-center rounded-full border transition", T.toggleBg, T.toggleText, isDark ? "border-white/12" : "border-slate-300/80")}
-            >
-              {isDark ? <Sun size={17} /> : <Moon size={17} />}
-            </button>
-
-            <motion.button onClick={handleDownload} whileTap={{ scale: 0.97 }} className={cn("flex items-center gap-2 rounded-[18px] border px-4 py-2.5 text-sm font-medium transition", T.buttonSecondary)}>
-              <Download size={15} />
-              Download
-            </motion.button>
-
-            <motion.button onClick={() => router.push("/")} whileTap={{ scale: 0.97 }} className="flex items-center gap-2 rounded-[18px] bg-gradient-to-r from-violet-600 to-fuchsia-500 px-4 py-2.5 text-sm font-semibold tracking-wide text-white shadow-[0_14px_30px_rgba(124,58,237,0.18)] transition hover:scale-[1.01] hover:from-violet-500 hover:to-fuchsia-400 active:scale-[0.99]">
-              <RotateCcw size={15} />
-              New Interview
-            </motion.button>
-          </div>
-        </div>
-      </header>
-
-      <main className="mx-auto w-full max-w-[1500px] space-y-6 px-6 py-6 xl:px-8 xl:py-8">
-
-        {/* Summary card */}
-        <motion.section initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} className={cn("rounded-[34px] p-8 md:p-10", T.card)}>
-          <div className="grid gap-6 xl:grid-cols-[1fr_1fr] xl:items-start">
-            <div className="max-w-[44rem]">
-              <div className={cn("mb-6 inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium", T.chip)}>
-                <Sparkles size={14} />
-                Report summary
-              </div>
-
-              <div>
-                <p className={cn("text-sm", T.muted)}>Assessment for</p>
-                <h1 className={cn("mt-2 text-[34px] font-semibold leading-[1.08] tracking-[-0.02em] md:text-[42px] xl:text-[48px]", T.strong)}>
-                  {assessment.candidate_name}
-                </h1>
-                <p className={cn("mt-3 text-[15px]", T.soft)}>
-                  {new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" })} · Cuemath AI Tutor Screener
-                </p>
-              </div>
-
-              <div className={cn("mt-6 rounded-[20px] p-5", T.summaryPanel)}>
-                <p className={cn("text-[15px] leading-8 italic", T.soft)}>&ldquo;{assessment.summary}&rdquo;</p>
-              </div>
-
-              {fallbackMode && (
-                <div className={cn("mt-5 inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-xs font-medium", isDark ? "border-amber-400/20 bg-amber-400/10 text-amber-300" : "border-amber-200 bg-amber-50 text-amber-700")}>
-                  <AlertCircle size={13} />
-                  Preliminary fallback assessment — manual review recommended
-                </div>
-              )}
-            </div>
-
-            {/* Score panel */}
-            <div className="w-full">
-              <div className={cn("rounded-[30px] p-7 md:p-8", T.panel)}>
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className={cn("text-xs uppercase tracking-[0.18em]", T.muted)}>Overall Score</p>
-                    <div className={cn("mt-2 text-5xl font-bold", getScoreTextColor(assessment.overall_score, isDark))}>
-                      {clampScore(assessment.overall_score)}
-                      <span className={cn("ml-1 text-xl font-medium", T.muted)}>/10</span>
-                    </div>
-                  </div>
-
-                  <div className={cn("flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-semibold", recommendationConfig.bg)}>
-                    <RecommendIcon size={16} className={recommendationConfig.color} />
-                    <span className={recommendationConfig.color}>{recommendationConfig.label}</span>
-                  </div>
-                </div>
-
-                <div className="mt-6 space-y-4">
-                  <div>
-                    <div className="mb-1.5 flex items-center justify-between text-xs">
-                      <span className={T.muted}>Dimension Average</span>
-                      <span className={cn("font-semibold", getScoreTextColor(averageDimensionScore, isDark))}>{averageDimensionScore}/10</span>
-                    </div>
-                    <div className={cn("h-2 rounded-full overflow-hidden", T.progressTrack)}>
-                      <div className={cn("h-full rounded-full", getScoreBarColor(averageDimensionScore))} style={{ width: `${(averageDimensionScore / 10) * 100}%` }} />
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="mb-1.5 flex items-center justify-between text-xs">
-                      <span className={T.muted}>Assessment Confidence</span>
-                      <span className={cn("font-semibold", confidence.isLow ? isDark ? "text-amber-300" : "text-amber-700" : confidence.pct >= 75 ? isDark ? "text-emerald-300" : "text-emerald-700" : isDark ? "text-amber-300" : "text-amber-700")}>
-                        {confidence.label}
-                      </span>
-                    </div>
-                    <div className={cn("h-2 rounded-full overflow-hidden", T.progressTrack)}>
-                      <div className={cn("h-full rounded-full", confidence.isLow ? "bg-amber-500" : confidence.pct >= 75 ? "bg-emerald-500" : "bg-amber-500")} style={{ width: `${confidence.pct}%` }} />
-                    </div>
-                  </div>
+        {/* Topbar */}
+        <header className="rp-topbar">
+          <div className="rp-container" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 20 }}>
+              <div className="rp-brand">
+                <div className="rp-brandmark"><BrainCircuit size={16} /></div>
+                <div>
+                  <div className="rp-brand-name">Cuemath</div>
+                  <div className="rp-brand-sub">Screening Report</div>
                 </div>
               </div>
             </div>
-          </div>
-        </motion.section>
-
-        {/* Tabs */}
-        <section className="flex flex-wrap gap-2">
-          {([
-            { key: "overview", label: "Overview", icon: BarChart2 },
-            { key: "details", label: "Details", icon: Quote },
-            { key: "transcript", label: "Transcript", icon: FileText },
-          ] as const).map((tab) => {
-            const Icon = tab.icon;
-            const active = activeTab === tab.key;
-            return (
-              <button key={tab.key} onClick={() => setActiveTab(tab.key)} className={cn("inline-flex items-center gap-2 rounded-[18px] border px-4 py-2.5 text-sm font-medium transition", active ? "border-transparent bg-gradient-to-r from-violet-600 to-fuchsia-500 text-white shadow-[0_14px_30px_rgba(124,58,237,0.18)]" : T.buttonSecondary)}>
-                <Icon size={15} />
-                {tab.label}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button className="rp-btn-secondary" onClick={handleDownload} style={{ height: 38, fontSize: 12 }}>
+                <Download size={13} /> Download Report
               </button>
-            );
-          })}
-        </section>
+              <button className="rp-btn-secondary" onClick={() => router.push("/")} style={{ height: 38, fontSize: 12 }}>
+                <ArrowLeft size={13} /> Home
+              </button>
+              <button className="rp-theme-btn" onClick={toggleTheme}>
+                {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
+              </button>
+            </div>
+          </div>
+        </header>
 
-        {/* Overview tab */}
-        {activeTab === "overview" && (
-          <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_1fr]">
-            <div className={cn("rounded-[30px] p-6", T.card)}>
-              <h3 className={cn("mb-5 text-base font-semibold", T.strong)}>Performance Radar</h3>
-              {radarData.length > 0 ? (
-                <ResponsiveContainer width="100%" height={300}>
-                  <RadarChart data={radarData}>
-                    <PolarGrid stroke={isDark ? "rgba(255,255,255,0.12)" : "rgba(15,23,42,0.12)"} />
-                    <PolarAngleAxis dataKey="dimension" tick={{ fill: isDark ? "#CBD5E1" : "#475569", fontSize: 12 }} />
-                    <PolarRadiusAxis domain={[0, 10]} tick={{ fill: isDark ? "#94A3B8" : "#64748B", fontSize: 10 }} />
-                    <Radar name="Score" dataKey="score" stroke="#8B5CF6" fill="#8B5CF6" fillOpacity={0.18} strokeWidth={2} />
-                    <Tooltip contentStyle={{ background: isDark ? "#0F172A" : "#FFFFFF", border: isDark ? "1px solid rgba(255,255,255,0.08)" : "1px solid rgba(15,23,42,0.10)", borderRadius: "14px", color: isDark ? "#FFFFFF" : "#0F172A" }} />
-                  </RadarChart>
-                </ResponsiveContainer>
-              ) : (
-                <p className={cn("text-sm", T.soft)}>No dimension data available.</p>
-              )}
+        <main className="rp-container" style={{ position: "relative", zIndex: 1, padding: "32px 28px 64px" }}>
+
+          {/* Fallback warning */}
+          {loadError && (
+            <div className="rp-warn-box rp-fadein" style={{ marginBottom: 20 }}>
+              <Info size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>{loadError}</span>
+            </div>
+          )}
+
+          {/* Hero — Score + Summary */}
+          <div className="rp-card rp-fadein" style={{ padding: "36px 40px", marginBottom: 24, display: "grid", gridTemplateColumns: "auto 1fr", gap: 40, alignItems: "center" }}>
+            {/* Score ring */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+              <div style={{ position: "relative", width: 140, height: 140 }}>
+                <ScoreRing score={assessment.overallScore} size={140} T={T} />
+                <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontSize: 32, fontWeight: 800, letterSpacing: "-0.04em", color: scoreColor, lineHeight: 1 }}>
+                    {assessment.overallScore.toFixed(1)}
+                  </span>
+                  <span style={{ fontSize: 11, color: T.textMuted, marginTop: 2 }}>out of 10</span>
+                </div>
+              </div>
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: scoreColor }}>{assessment.overallLabel}</div>
+                <div style={{ marginTop: 8 }}>
+                  <RecBadge rec={assessment.recommendation} T={T} />
+                </div>
+              </div>
             </div>
 
-            <div className={cn("rounded-[30px] p-6", T.card)}>
-              <h3 className={cn("mb-5 text-base font-semibold", T.strong)}>Dimension Scores</h3>
-              <div className="space-y-5">
-                {dimensionEntries.map(([key, val]) => {
-                  const score = clampScore(val.score);
+            {/* Summary */}
+            <div>
+              <div className="rp-chip-label" style={{ marginBottom: 10 }}>Candidate Assessment</div>
+              <h1 style={{ margin: "0 0 8px", fontSize: 28, fontWeight: 700, letterSpacing: "-0.035em", lineHeight: 1.2 }}>
+                {assessment.candidateName}
+              </h1>
+              <p style={{ margin: "0 0 20px", fontSize: 15, lineHeight: 1.75, color: T.textSoft }}>
+                {assessment.summary}
+              </p>
+              <div style={{ fontSize: 12, color: T.textMuted }}>
+                Generated {new Date(assessment.generatedAt).toLocaleString()}
+                {assessment._fallback && " · Fallback mode"}
+              </div>
+            </div>
+          </div>
+
+          {/* Two-column grid: Dimensions + Strengths/Improvements */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 24, marginBottom: 24 }}>
+
+            {/* Dimensions */}
+            <div>
+              <div className="rp-chip-label" style={{ marginBottom: 16 }}>Dimension Scores</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                {DIM_CONFIG.map(({ key, label, Icon, description }, i) => {
+                  const dim = assessment.dimensions[key];
+                  const color = dim.score >= 7 ? T.success : dim.score >= 5 ? T.warning : T.danger;
                   return (
-                    <div key={key}>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className={cn("text-sm", T.soft)}>{DIMENSION_LABELS[key] ?? key}</span>
-                        <span className={cn("text-sm font-semibold", getScoreTextColor(score, isDark))}>{score}/10</span>
+                    <div key={key} className="rp-dim-card rp-fadein" style={{ animationDelay: `${i * 0.07}s` }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                        <div style={{ width: 38, height: 38, borderRadius: 11, background: T.accentGlow, border: `1px solid ${T.accentRing}`, display: "grid", placeItems: "center", flexShrink: 0 }}>
+                          <Icon size={17} color={T.accentText} />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                            <div>
+                              <span style={{ fontSize: 14, fontWeight: 700, color: T.text }}>{label}</span>
+                              <span style={{ fontSize: 11, color: T.textMuted, marginLeft: 8 }}>{description}</span>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+                              <span style={{ fontSize: 18, fontWeight: 800, color, letterSpacing: "-0.03em" }}>{dim.score.toFixed(1)}</span>
+                              <span style={{ fontSize: 11, color: T.textMuted }}>/10</span>
+                              <span style={{ fontSize: 11, fontWeight: 700, color, padding: "2px 8px", borderRadius: 999, border: `1px solid ${color}22`, background: `${color}11` }}>{dim.label}</span>
+                            </div>
+                          </div>
+                          <GaugeBar score={dim.score} T={T} />
+                        </div>
                       </div>
-                      <div className={cn("h-2.5 rounded-full overflow-hidden", T.progressTrack)}>
-                        <motion.div className={cn("h-full rounded-full", getScoreBarColor(score))} initial={{ width: 0 }} animate={{ width: `${(score / 10) * 100}%` }} transition={{ duration: 0.6 }} />
-                      </div>
+                      <p style={{ margin: "0 0 12px", fontSize: 13.5, lineHeight: 1.65, color: T.textSoft }}>
+                        {dim.feedback}
+                      </p>
+                      {dim.highlights.length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
+                          {dim.highlights.map((h, j) => (
+                            <span key={j} style={{ fontSize: 11.5, padding: "4px 10px", borderRadius: 999, border: `1px solid ${T.border}`, background: T.inset, color: T.textSoft }}>
+                              {h}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
               </div>
             </div>
 
-            <div className={cn("rounded-[30px] p-6", T.card)}>
-              <h3 className={cn("mb-4 flex items-center gap-2 text-base font-semibold", isDark ? "text-emerald-300" : "text-emerald-700")}>
-                <CheckCircle size={18} />
-                Strengths
-              </h3>
-              <ul className="space-y-3">
-                {(assessment.strengths || []).map((s, i) => (
-                  <li key={i} className={cn("flex items-start gap-3 rounded-[20px] p-4", T.panel)}>
-                    <div className={cn("mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold", isDark ? "bg-emerald-400/15 text-emerald-300" : "bg-emerald-100 text-emerald-700")}>{i + 1}</div>
-                    <span className={cn("text-sm leading-6", T.soft)}>{s}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+            {/* Right column: Strengths + Improvements + Mini score grid */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
 
-            <div className={cn("rounded-[30px] p-6", T.card)}>
-              <h3 className={cn("mb-4 flex items-center gap-2 text-base font-semibold", isDark ? "text-rose-300" : "text-rose-700")}>
-                <AlertCircle size={18} />
-                Areas of Concern
-              </h3>
-              {(assessment.concerns || []).length > 0 ? (
-                <ul className="space-y-3">
-                  {assessment.concerns.map((c, i) => (
-                    <li key={i} className={cn("flex items-start gap-3 rounded-[20px] p-4", T.panel)}>
-                      <div className={cn("mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-bold", isDark ? "bg-rose-400/15 text-rose-300" : "bg-rose-100 text-rose-700")}>{i + 1}</div>
-                      <span className={cn("text-sm leading-6", T.soft)}>{c}</span>
+              {/* Score summary grid */}
+              <div className="rp-panel rp-fadein" style={{ padding: 18 }}>
+                <div className="rp-chip-label" style={{ marginBottom: 14 }}>Score Summary</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {DIM_CONFIG.map(({ key, label }) => {
+                    const dim = assessment.dimensions[key];
+                    const color = dim.score >= 7 ? T.success : dim.score >= 5 ? T.warning : T.danger;
+                    return (
+                      <div key={key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <span style={{ fontSize: 12, color: T.textSoft, width: 110, flexShrink: 0 }}>{label}</span>
+                        <GaugeBar score={dim.score} T={T} />
+                        <span style={{ fontSize: 13, fontWeight: 700, color, width: 28, textAlign: "right", flexShrink: 0 }}>{dim.score.toFixed(0)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Strengths */}
+              <div className="rp-panel rp-fadein" style={{ padding: 18 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                  <TrendingUp size={14} color={T.success} />
+                  <span className="rp-chip-label" style={{ color: T.success }}>Strengths</span>
+                </div>
+                <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                  {assessment.strengths.map((s, i) => (
+                    <li key={i} style={{ display: "flex", alignItems: "flex-start", gap: 9, fontSize: 13, lineHeight: 1.55, color: T.textSoft }}>
+                      <Star size={12} color={T.success} style={{ flexShrink: 0, marginTop: 3 }} />
+                      {s}
                     </li>
                   ))}
                 </ul>
-              ) : (
-                <p className={cn("text-sm", T.soft)}>No major concerns noted.</p>
+              </div>
+
+              {/* Improvements */}
+              {assessment.improvements.length > 0 && (
+                <div className="rp-panel rp-fadein" style={{ padding: 18 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                    <ChevronRight size={14} color={T.warning} />
+                    <span className="rp-chip-label" style={{ color: T.warning }}>Areas to Improve</span>
+                  </div>
+                  <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 8 }}>
+                    {assessment.improvements.map((s, i) => (
+                      <li key={i} style={{ display: "flex", alignItems: "flex-start", gap: 9, fontSize: 13, lineHeight: 1.55, color: T.textSoft }}>
+                        <span style={{ width: 5, height: 5, borderRadius: "50%", background: T.warning, flexShrink: 0, marginTop: 6 }} />
+                        {s}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <button className="rp-btn-primary" onClick={handleDownload} style={{ width: "100%", height: 46 }}>
+                  <Download size={15} /> Download Full Report
+                </button>
+                <button className="rp-btn-secondary" onClick={() => router.push("/")} style={{ width: "100%", height: 42, justifyContent: "center" }}>
+                  <ArrowLeft size={14} /> Return to Home
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* Transcript toggle */}
+          {transcript && (
+            <div className="rp-card rp-fadein" style={{ padding: 24 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: showTranscript ? 16 : 0 }}>
+                <div>
+                  <div className="rp-chip-label">Interview Transcript</div>
+                  <p style={{ margin: "4px 0 0", fontSize: 13, color: T.textSoft }}>Full conversation recorded during the screening</p>
+                </div>
+                <button className="rp-toggle-btn" onClick={() => setShowTranscript((v) => !v)}>
+                  {showTranscript ? "Hide transcript" : "View transcript"} <ChevronRight size={13} style={{ transform: showTranscript ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.2s" }} />
+                </button>
+              </div>
+              {showTranscript && (
+                <div className="rp-transcript-box">
+                  {transcript}
+                </div>
               )}
             </div>
-          </motion.section>
-        )}
-
-        {/* Details tab */}
-        {activeTab === "details" && (
-          <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="space-y-4">
-            {dimensionEntries.map(([key, val]) => {
-              const score = clampScore(val.score);
-              return (
-                <div key={key} className={cn("rounded-[30px] p-6", T.card)}>
-                  <div className="mb-4 flex items-center justify-between">
-                    <h3 className={cn("text-base font-semibold", T.strong)}>{DIMENSION_LABELS[key] ?? key}</h3>
-                    <div className={cn("text-2xl font-bold", getScoreTextColor(score, isDark))}>
-                      {score}<span className={cn("ml-1 text-sm font-medium", T.muted)}>/10</span>
-                    </div>
-                  </div>
-
-                  <div className={cn("mb-4 h-2 rounded-full overflow-hidden", T.progressTrack)}>
-                    <motion.div className={cn("h-full rounded-full", getScoreBarColor(score))} initial={{ width: 0 }} animate={{ width: `${(score / 10) * 100}%` }} transition={{ duration: 0.55 }} />
-                  </div>
-
-                  <div className={cn("flex items-start gap-3 rounded-[20px] p-4", T.quote)}>
-                    <Quote size={15} className={cn("mt-0.5 shrink-0", isDark ? "text-violet-300" : "text-violet-600")} />
-                    <p className={cn("text-sm italic leading-7", T.soft)}>{val.evidence || "Insufficient evidence available."}</p>
-                  </div>
-                </div>
-              );
-            })}
-
-            <div className={cn("rounded-[30px] p-6", T.card)}>
-              <h3 className={cn("mb-3 text-base font-semibold", isDark ? "text-violet-300" : "text-violet-700")}>Interviewer Notes</h3>
-              <p className={cn("text-sm leading-7", T.soft)}>{assessment.interviewer_notes}</p>
-            </div>
-          </motion.section>
-        )}
-
-        {/* Transcript tab */}
-        {activeTab === "transcript" && (
-          <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className={cn("rounded-[30px] p-6", T.card)}>
-            <h3 className={cn("mb-5 text-base font-semibold", T.strong)}>Full Interview Transcript</h3>
-
-            {transcriptLines.length > 0 ? (
-              <div className="space-y-3">
-                {transcriptLines.map((entry, i) => (
-                  <div key={i} className={cn("rounded-[20px] border p-4 text-sm", entry.isMaya ? T.transcriptMaya : T.transcriptCandidate)}>
-                    <span className={cn("font-semibold", entry.isMaya ? isDark ? "text-violet-300" : "text-violet-700" : isDark ? "text-orange-300" : "text-orange-700")}>
-                      {entry.speaker}:{" "}
-                    </span>
-                    <span className={T.soft}>{entry.content}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className={cn("text-sm", T.soft)}>No transcript available.</p>
-            )}
-          </motion.section>
-        )}
-      </main>
-    </div>
+          )}
+        </main>
+      </div>
+    </>
   );
 }
