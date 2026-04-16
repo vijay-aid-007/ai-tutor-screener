@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const SILENCE_MS = 7000;
+const SILENCE_MS = 6000;
 const EMPTY_RESPONSE_MS = 10000;
 const TOTAL_Q = 6;
 const EMPTY_RESPONSE_TOKEN = "__EMPTY_RESPONSE__";
@@ -865,23 +865,28 @@ export default function InterviewPage() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, transcriptPreview, isLoading]);
+  
+  const introStartedRef = useRef(false);
 
   useEffect(() => {
     if (
       screen !== "briefing" ||
-      mayaIntroPlayed ||
+      introStartedRef.current ||
       !nameLoaded ||
       candidateName === "Candidate"
     )
       return;
+    introStartedRef.current = true;
+
     const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+    
     const t = setTimeout(() => {
       hardAbortRef.current = false;
       void speak(intro);
       setMayaIntroPlayed(true);
     }, 800);
     return () => clearTimeout(t);
-  }, [screen, mayaIntroPlayed, nameLoaded, candidateName, speak]);
+  }, [screen, nameLoaded, candidateName]);
 
   const requestMicPermission = useCallback(async () => {
     setMicStateSynced("requesting");
