@@ -19,6 +19,7 @@ import {
   UserX,
   BrainCircuit,
   ShieldCheck,
+  WindIcon,
 } from "lucide-react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -870,20 +871,28 @@ export default function InterviewPage() {
   const introStartedRef = useRef(false);
 
   useEffect(() => {
-    const introLocked = sessionStorage.getItem("maya_intro_played") === "true";
+
+    if (typeof window === "undefined") return;
+
+    const introLockedInSession = 
+      sessionStorage.getItem("maya_intro_played") === "true";
+    
+    const introLockedInWindow = 
+      (window as typeof window & { __mayaIntroStarted?: boolean }).__mayaIntroStarted === true;
 
     if (
       screen !== "briefing" ||
       mayaIntroPlayed ||
-      introLocked ||
       introStartedRef.current ||
+      introLockedInSession ||
+      introLockedInWindow ||
       !nameLoaded ||
       candidateName === "Candidate"
     ) {
       return;
     }
     introStartedRef.current = true;
-    // setMayaIntroPlayed(true);
+    (window as typeof window & { __mayaIntroStarted?: boolean }).__mayaIntroStarted = true;
     sessionStorage.setItem("maya_intro_played", "true");
 
     const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
