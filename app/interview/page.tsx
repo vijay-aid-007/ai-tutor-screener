@@ -867,9 +867,6 @@ export default function InterviewPage() {
   }, [messages, transcriptPreview, isLoading]);
   
 
-
-
-
   const introStartedRef = useRef(false);
 
   useEffect(() => {
@@ -886,23 +883,19 @@ export default function InterviewPage() {
       return;
     }
     introStartedRef.current = true;
-    setMayaIntroPlayed(true);
+    // setMayaIntroPlayed(true);
     sessionStorage.setItem("maya_intro_played", "true");
 
     const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
     
     const t = setTimeout(() => {
       hardAbortRef.current = false;
-      // setMayaIntroPlayed(true);
+      setMayaIntroPlayed(true);
       void speak(intro);
     }, 800);
     return () => clearTimeout(t);
   }, [screen, nameLoaded, candidateName, mayaIntroPlayed]);
 
-  
-  
-  
-  
   
   const requestMicPermission = useCallback(async () => {
     setMicStateSynced("requesting");
