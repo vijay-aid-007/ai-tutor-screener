@@ -505,6 +505,9 @@ function StatusPill({
   );
 }
 
+// ─── Module-level intro lock (survives React re-renders and reconciliation) ──
+let _introFired = false;
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function InterviewPage() {
   const router = useRouter();
@@ -872,16 +875,27 @@ export default function InterviewPage() {
   const speakRef = useRef(speak);
   useEffect(() => { speakRef.current = speak; }, [speak]);
 
+  // Track previous nameLoaded to detect the false→true transition
+  const prevNameLoadedRef = useRef(false);
+
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (screen !== "briefing" || !nameLoaded || candidateName === "Candidate") return;
-    if (sessionStorage.getItem("maya_intro_played") === "true") return;
-    if (introStartedRef.current) return;
+    // Only fire on the exact moment nameLoaded flips to true
+    if (!nameLoaded || prevNameLoadedRef.current) return;
+    prevNameLoadedRef.current = true;
 
+    if (candidateName === "Candidate") return;
+    if (screen !== "briefing") return;
+
+    // Module-level lock: survives every React render, reconciliation,
+    // hydration cycle, and concurrent mode scheduling on Vercel.
+    if (_introFired) return;
+    _introFired = true;
     introStartedRef.current = true;
-    sessionStorage.setItem("maya_intro_played", "true");
 
-    const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+    // TODO: restore full intro text after confirming fix
+    const intro = `Hi ${candidateName}`;
+    // const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+
 
     const t = setTimeout(() => {
       hardAbortRef.current = false;
@@ -890,7 +904,7 @@ export default function InterviewPage() {
     }, 800);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [screen, nameLoaded, candidateName]);
+  }, [nameLoaded]);
 
   
   const requestMicPermission = useCallback(async () => {
@@ -2106,6 +2120,7 @@ export default function InterviewPage() {
   const handleReturnHome = useCallback(() => {
     stopEverythingNow();
     sessionStorage.removeItem("maya_intro_played");
+    _introFired = false;
     router.push("/");
   }, [router, stopEverythingNow]);
 
