@@ -874,6 +874,16 @@ export default function InterviewPage() {
 
     if (typeof window === "undefined") return;
 
+    console.log("INTRO EFFECT RUN", {
+      screen,
+      mayaIntroPlayed,
+      introStartedRef: introStartedRef.current,
+      sessionLock: sessionStorage.getItem("maya_intro_played"),
+      windowLock: (window as typeof window & { __mayaIntroStarted?: boolean }).__mayaIntroStarted,
+      nameLoaded,
+      candidateName,
+    });
+
     const introLockedInSession = 
       sessionStorage.getItem("maya_intro_played") === "true";
     
@@ -898,6 +908,7 @@ export default function InterviewPage() {
     const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
     
     const t = setTimeout(() => {
+      console.log("INTRO SPEAKING NOW");
       hardAbortRef.current = false;
       setMayaIntroPlayed(true);
       void speak(intro);
