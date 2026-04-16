@@ -89,6 +89,7 @@ export default function LandingPage() {
 
     localStorage.setItem("candidate_name", cleanName);
     localStorage.setItem("candidate_email", cleanEmail);
+    sessionStorage.removeItem("maya_intro_played");
     router.push("/interview");
   };
 
