@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const SILENCE_MS = 6000;
+const SILENCE_MS = 5000;
 const EMPTY_RESPONSE_MS = 10000;
 const TOTAL_Q = 6;
 const EMPTY_RESPONSE_TOKEN = "__EMPTY_RESPONSE__";
