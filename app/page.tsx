@@ -381,7 +381,7 @@ export default function LandingPage() {
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
                       onBlur={() => setEmailTouched(true)}
-                      placeholder="Enter your email address --> name@gmail.com"
+                      placeholder="name@gmail.com"
                       autoComplete="email"
                     />
                   </div>
