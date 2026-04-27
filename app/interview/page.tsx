@@ -24,7 +24,7 @@ import {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const SILENCE_MS = 5000;
-const EMPTY_RESPONSE_MS = 10000;
+const EMPTY_RESPONSE_MS = 8000;
 const TOTAL_Q = 6;
 const EMPTY_RESPONSE_TOKEN = "__EMPTY_RESPONSE__";
 
@@ -892,7 +892,7 @@ export default function InterviewPage() {
     introStartedRef.current = true;
 
     // TODO: restore full intro text after confirming fix
-    const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+    const intro = `Hi ${candidateName}! I'm Evalrix, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
 
 
     const t = setTimeout(() => {
