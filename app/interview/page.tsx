@@ -891,10 +891,8 @@ export default function InterviewPage() {
     _introFired = true;
     introStartedRef.current = true;
 
-    // TODO: restore full intro text after confirming fix
     const intro = `Hi ${candidateName}! I'm Evalrix, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
-
-
+    
     const t = setTimeout(() => {
       hardAbortRef.current = false;
       setMayaIntroPlayed(true);
