@@ -23,12 +23,12 @@ import {
 } from "lucide-react";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const SILENCE_MS = 6000;
-const EMPTY_RESPONSE_MS = 10000;
+const SILENCE_MS = 5000;
+const EMPTY_RESPONSE_MS = 8000;
 const TOTAL_Q = 6;
 const EMPTY_RESPONSE_TOKEN = "__EMPTY_RESPONSE__";
 
-const FACE_ABSENCE_TERMINATE_MS = 15000;
+const FACE_ABSENCE_TERMINATE_MS = 18000;
 const FACE_CHECK_INTERVAL_MS = 400;
 const PRESENCE_WARMUP_FRAMES = 6;
 const CONSECUTIVE_ABSENT_THRESHOLD = 2;
@@ -892,7 +892,7 @@ export default function InterviewPage() {
     introStartedRef.current = true;
 
     // TODO: restore full intro text after confirming fix
-    const intro = `Hi ${candidateName}! I'm Maya, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
+    const intro = `Hi ${candidateName}! I'm Evalrix, your AI interviewer from Cuemath. This is a short, voice-first screening interview. Please enable both your microphone and camera before starting — both are required for this interview. I'll guide you through each step.`;
 
 
     const t = setTimeout(() => {
